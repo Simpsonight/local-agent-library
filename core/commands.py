@@ -28,7 +28,13 @@ class TxtCommand:
     first_line: str = ""
 
 
-Command = CtxCommand | UrlCommand | FileCommand | TxtCommand
+@dataclass(frozen=True)
+class HelpCommand:
+    """Show available commands."""
+    pass
+
+
+Command = CtxCommand | UrlCommand | FileCommand | TxtCommand | HelpCommand
 
 
 def parse_command(raw: str) -> Command:
@@ -64,6 +70,9 @@ def parse_command(raw: str) -> Command:
 
     if raw == "/file":
         raise ValueError("/file requires a path argument")
+
+    if raw == "/help":
+        return HelpCommand()
 
     if raw == "/txt":
         return TxtCommand(first_line="")

@@ -125,6 +125,32 @@ class Agent:
                 variables[var] = "[MISSING]"
         return tpl.render(**variables)
 
+    def run_stream(self, prompt: str):
+        """Call litellm with streaming enabled.
+
+        Yields ``(delta_text, None)`` per chunk and ``("", finish_reason)`` at end.
+        """
+        response = self._completion_fn(
+            model=self.config["model"],
+            temperature=self.config["temperature"],
+            max_tokens=self.config["max_tokens"],
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            stream=True,
+        )
+        for chunk in response:
+            choice = chunk.choices[0]
+            delta_obj = getattr(choice, "delta", None)
+            delta = getattr(delta_obj, "content", None) or ""
+            if choice.finish_reason:
+                yield ("", choice.finish_reason)
+                return
+            if delta:
+                yield (delta, None)
+        yield ("", "stop")
+
     def run(self, prompt: str) -> tuple[str, str]:
         """Call litellm with system prompt + user prompt.
 

@@ -42,3 +42,26 @@ def make_mock_completion(text="mock response", finish_reason="stop"):
         )
         return SimpleNamespace(choices=[choice])
     return _mock
+
+
+def make_mock_stream_completion(chunks, finish_reason="stop"):
+    """Factory that returns a mock streaming completion callable.
+
+    *chunks* is a list of strings; each becomes one streamed delta.
+    """
+    def _mock(**kwargs):
+        for text in chunks:
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=text),
+                    finish_reason=None,
+                )]
+            )
+        # Final chunk with finish_reason
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=None),
+                finish_reason=finish_reason,
+            )]
+        )
+    return _mock

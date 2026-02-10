@@ -8,6 +8,7 @@ from core.commands import (
     UrlCommand,
     FileCommand,
     TxtCommand,
+    HelpCommand,
 )
 
 
@@ -59,6 +60,11 @@ class TestTxtCommand:
 
     def test_txt_with_text(self):
         assert parse_command("/txt hello world") == TxtCommand(first_line="hello world")
+
+
+class TestHelpCommand:
+    def test_help(self):
+        assert parse_command("/help") == HelpCommand()
 
 
 class TestNotACommand:

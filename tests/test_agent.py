@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 from core.engine import Agent
-from tests.conftest import make_mock_completion
+from tests.conftest import make_mock_completion, make_mock_stream_completion
 
 
 class TestAgentLoading:
@@ -102,3 +102,32 @@ class TestAgentRun:
         assert len(captured["messages"]) == 2
         assert captured["messages"][0]["role"] == "system"
         assert captured["messages"][1]["content"] == "test prompt"
+
+
+class TestAgentRunStream:
+    def test_stream_yields_chunks(self, tmp_agent_dir):
+        mock_fn = make_mock_stream_completion(["Hello", ", ", "World!"])
+        agent = Agent(tmp_agent_dir, completion_fn=mock_fn)
+        tokens = list(agent.run_stream("test"))
+        # All non-empty deltas + final finish_reason
+        deltas = [(d, r) for d, r in tokens if d]
+        assert deltas == [("Hello", None), (", ", None), ("World!", None)]
+        # Last token has finish reason
+        assert tokens[-1] == ("", "stop")
+
+    def test_stream_finish_reason_length(self, tmp_agent_dir):
+        mock_fn = make_mock_stream_completion(["partial"], finish_reason="length")
+        agent = Agent(tmp_agent_dir, completion_fn=mock_fn)
+        tokens = list(agent.run_stream("test"))
+        assert tokens[-1] == ("", "length")
+
+    def test_stream_passes_stream_flag(self, tmp_agent_dir):
+        captured = {}
+
+        def capture_fn(**kwargs):
+            captured.update(kwargs)
+            return make_mock_stream_completion(["ok"])(**kwargs)
+
+        agent = Agent(tmp_agent_dir, completion_fn=capture_fn)
+        list(agent.run_stream("test"))
+        assert captured["stream"] is True
