@@ -67,9 +67,10 @@ session_cache = SessionCache()
 class Agent:
     """An agent defined by a folder containing system.txt, optional config.yaml, and .j2 templates."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, completion_fn=None):
         self.path = Path(path)
         self.name = self.path.name
+        self._completion_fn = completion_fn or litellm.completion
 
         # Load system prompt
         system_file = self.path / "system.txt"
@@ -130,7 +131,7 @@ class Agent:
         Returns (text, finish_reason).  finish_reason is typically
         'stop' (complete) or 'length' (truncated by max_tokens).
         """
-        response = litellm.completion(
+        response = self._completion_fn(
             model=self.config["model"],
             temperature=self.config["temperature"],
             max_tokens=self.config["max_tokens"],

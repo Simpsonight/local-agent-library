@@ -16,7 +16,8 @@ from litellm.exceptions import (
     Timeout,
 )
 
-from core.engine import Agent, session_cache
+from core.engine import Agent, session_cache, SessionCache
+from core.commands import parse_command, CtxCommand, UrlCommand, FileCommand, TxtCommand
 from core.utils import scrape_url, read_file
 
 logger = logging.getLogger(__name__)
@@ -109,57 +110,58 @@ def read_multiline(first_line: str = "") -> str:
     return "\n".join(lines)
 
 
-def resolve_command(raw: str) -> str | None:
+def resolve_command(raw: str, cache: SessionCache | None = None) -> str | None:
     """Try to resolve a slash-command (/ctx, /url, /file).
 
     Returns the resolved string on success, None on error,
-    or raises ValueError if *raw* is not a recognized command.
+    or raises ValueError if *raw* is not a recognized command
+    (including /txt, which is handled by the caller).
     """
-    if raw == "/ctx" or raw.startswith("/ctx "):
-        alias = raw[5:].strip() if raw.startswith("/ctx ") else ""
-        token = f"ctx.{alias}" if alias else "ctx"
-        resolved = session_cache.resolve(token)
+    cmd = parse_command(raw)  # raises ValueError if not a command
+
+    if isinstance(cmd, TxtCommand):
+        raise ValueError("not a command")
+
+    cache = cache or session_cache
+
+    if isinstance(cmd, CtxCommand):
+        token = f"ctx.{cmd.alias}" if cmd.alias else "ctx"
+        resolved = cache.resolve(token)
         if resolved is None:
-            label = alias or "letzte Ausgabe"
+            label = cmd.alias or "letzte Ausgabe"
             print(color(f"  Fehler: '{label}' nicht im Session-Cache gefunden.", RED))
             return None
         print(color(f"  Aus Cache geladen ({len(resolved)} Zeichen).", GREEN))
         return resolved
-    if raw.startswith("/url "):
-        rest = raw[5:].strip()
-        parts = rest.split(None, 1)
-        auth = None
-        url = rest
-        if len(parts) == 2 and ":" in parts[0] and not parts[0].startswith("http"):
-            user, password = parts[0].split(":", 1)
-            auth = (user, password)
-            url = parts[1]
-        print(color(f"  Lade {url} ...", YELLOW))
+
+    if isinstance(cmd, UrlCommand):
+        print(color(f"  Lade {cmd.url} ...", YELLOW))
         try:
-            content = scrape_url(url, auth=auth)
+            content = scrape_url(cmd.url, auth=cmd.auth)
             print(color(f"  Geladen ({len(content)} Zeichen).", GREEN))
             return content
         except Exception as e:
             print(color(f"  Fehler beim Laden der URL: {e}", RED))
             return None
-    if raw.startswith("/file "):
-        fpath = raw[6:].strip()
+
+    if isinstance(cmd, FileCommand):
         try:
-            content = read_file(fpath)
+            content = read_file(cmd.path)
             print(color(f"  Datei geladen ({len(content)} Zeichen).", GREEN))
             return content
         except Exception as e:
             print(color(f"  Fehler beim Lesen der Datei: {e}", RED))
             return None
-    # Not a recognized command
+
     raise ValueError("not a command")
 
 
-def collect_variables(agent: Agent, template_name: str) -> dict | None:
+def collect_variables(agent: Agent, template_name: str, cache: SessionCache | None = None) -> dict | None:
     """Prompt the user for each template variable.
 
     Returns the variables dict, or None if the user aborts.
     """
+    cache = cache or session_cache
     variables = {}
     var_names = agent.scan_variables(template_name)
     if not var_names:
@@ -169,7 +171,7 @@ def collect_variables(agent: Agent, template_name: str) -> dict | None:
     print(color("\nVariablen eingeben (/ctx, /url, /file = Befehle | Text = mehrzeilig, --- zum Abschliessen):", BOLD))
     for var in sorted(var_names):
         # Check if a previous value exists for this variable
-        prev = session_cache.get_variable(var)
+        prev = cache.get_variable(var)
 
         while True:
             if prev:
@@ -193,7 +195,7 @@ def collect_variables(agent: Agent, template_name: str) -> dict | None:
 
             # Try slash-commands (single-line, resolved immediately)
             try:
-                resolved = resolve_command(raw)
+                resolved = resolve_command(raw, cache=cache)
                 if resolved is not None:
                     variables[var] = resolved
                     break
