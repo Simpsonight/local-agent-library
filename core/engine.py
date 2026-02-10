@@ -1,17 +1,21 @@
 """Agent engine: loads agents from folder structure, renders templates, calls LLMs."""
 
+import logging
 from pathlib import Path
 
 import yaml
-from jinja2 import Environment, FileSystemLoader, meta, Undefined
+from jinja2 import Environment, FileSystemLoader, meta
 import litellm
 
+logger = logging.getLogger(__name__)
 
 DEFAULTS = {
     "model": "gpt-4o",
     "temperature": 0.7,
     "max_tokens": 16384,
 }
+
+VALID_CONFIG_KEYS = set(DEFAULTS.keys())
 
 
 class SessionCache:
@@ -79,6 +83,21 @@ class Agent:
         if config_file.exists():
             with open(config_file, encoding="utf-8") as f:
                 overrides = yaml.safe_load(f) or {}
+            unknown = set(overrides.keys()) - VALID_CONFIG_KEYS
+            if unknown:
+                logger.warning("Unknown config keys in %s: %s", config_file, unknown)
+            if "model" in overrides and not isinstance(overrides["model"], str):
+                raise ValueError(f"model must be a string in {config_file}, got {type(overrides['model']).__name__}")
+            if "temperature" in overrides:
+                if not isinstance(overrides["temperature"], (int, float)):
+                    raise ValueError(f"temperature must be a number in {config_file}, got {type(overrides['temperature']).__name__}")
+                if not 0.0 <= overrides["temperature"] <= 2.0:
+                    logger.warning("temperature %.2f in %s is outside typical range [0.0, 2.0]", overrides["temperature"], config_file)
+            if "max_tokens" in overrides:
+                if not isinstance(overrides["max_tokens"], int):
+                    raise ValueError(f"max_tokens must be an integer in {config_file}, got {type(overrides['max_tokens']).__name__}")
+                if overrides["max_tokens"] <= 0:
+                    raise ValueError(f"max_tokens must be positive in {config_file}, got {overrides['max_tokens']}")
             self.config.update(overrides)
 
         # Discover templates
@@ -87,7 +106,6 @@ class Agent:
         # Jinja2 environment scoped to agent folder
         self._env = Environment(
             loader=FileSystemLoader(str(self.path)),
-            undefined=Undefined,
         )
 
     def scan_variables(self, template_name: str) -> set[str]:

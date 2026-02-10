@@ -1,27 +1,41 @@
 #!/usr/bin/env python3
 """Local Agent Library – Interactive CLI for orchestrating AI agents."""
 
+import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from litellm.exceptions import (
+    APIConnectionError,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+    Timeout,
+)
 
 from core.engine import Agent, session_cache
 from core.utils import scrape_url, read_file
 
+logger = logging.getLogger(__name__)
+
 AGENTS_DIR = Path(__file__).parent / "agents"
 
-# ANSI colors
-CYAN = "\033[96m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
+# ANSI colors – disabled when stdout is not a terminal or NO_COLOR is set
+_NO_COLOR = not sys.stdout.isatty() or "NO_COLOR" in os.environ
+CYAN = "" if _NO_COLOR else "\033[96m"
+GREEN = "" if _NO_COLOR else "\033[92m"
+YELLOW = "" if _NO_COLOR else "\033[93m"
+RED = "" if _NO_COLOR else "\033[91m"
+BOLD = "" if _NO_COLOR else "\033[1m"
+RESET = "" if _NO_COLOR else "\033[0m"
 
 
 def color(text: str, code: str) -> str:
+    if _NO_COLOR:
+        return text
     return f"{code}{text}{RESET}"
 
 
@@ -211,6 +225,10 @@ def collect_variables(agent: Agent, template_name: str) -> dict | None:
 
 def main():
     load_dotenv()
+    logging.basicConfig(
+        level=logging.DEBUG if os.environ.get("LAL_DEBUG") else logging.WARNING,
+        format="%(name)s %(levelname)s: %(message)s",
+    )
     print_banner()
 
     while True:
@@ -255,8 +273,27 @@ def main():
                 try:
                     result, finish_reason = agent.run(rendered)
                     break
+                except AuthenticationError:
+                    print(color("\nAuthentifizierung fehlgeschlagen. API-Key in .env prüfen.", RED))
+                    logger.debug("AuthenticationError for model %s", agent.config["model"])
+                    break
+                except BadRequestError as e:
+                    print(color(f"\nUngültige Anfrage: {e}", RED))
+                    logger.debug("BadRequestError: %s", e, exc_info=True)
+                    break
+                except RateLimitError:
+                    print(color("\nRate-Limit erreicht. Bitte kurz warten.", RED))
+                    retry = input(color("Erneut versuchen? (Enter = ja, q = abbrechen): ", YELLOW)).strip().lower()
+                    if retry == "q":
+                        break
+                except (APIConnectionError, Timeout):
+                    print(color("\nVerbindung zum API-Server fehlgeschlagen.", RED))
+                    retry = input(color("Erneut versuchen? (Enter = ja, q = abbrechen): ", YELLOW)).strip().lower()
+                    if retry == "q":
+                        break
                 except Exception as e:
                     print(color(f"\nLLM-Fehler: {e}", RED))
+                    logger.debug("LLM error: %s", e, exc_info=True)
                     retry = input(color("Erneut versuchen? (Enter = ja, q = abbrechen): ", YELLOW)).strip().lower()
                     if retry == "q":
                         break
