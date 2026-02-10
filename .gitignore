@@ -18,3 +18,5 @@ output/
 *.swo
 *~
 .DS_Store
+.claude/
+CLAUDE.md
