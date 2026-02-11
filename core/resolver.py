@@ -1,6 +1,6 @@
 """Command resolution and variable collection — bridges parsed commands to I/O."""
 
-from core.cli import console, print_error, print_success, print_warning, read_multiline
+from core.cli import console, print_error, print_success, print_warning, read_multiline, prompt_variable
 from core.commands import (
     parse_command,
     Command,
@@ -87,11 +87,7 @@ def collect_variables(agent: Agent, template_name: str, cache: SessionCache | No
         prev = cache.get_variable(var)
 
         while True:
-            if prev:
-                prompt_suffix = f" [Enter = reuse previous ({len(prev)} chars)]"
-                raw = console.input(f"[prompt]  {var}{prompt_suffix}: [/]").strip()
-            else:
-                raw = console.input(f"[prompt]  {var}: [/]").strip()
+            raw = prompt_variable(var, prev_value=prev)
 
             # Empty input
             if not raw:
