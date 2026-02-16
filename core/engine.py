@@ -1,11 +1,14 @@
 """Agent engine: loads agents from folder structure, renders templates, calls LLMs."""
 
+import json
 import logging
 from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, meta
 import litellm
+
+from core.schema import OutputSchema, load_output_schema
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +18,7 @@ DEFAULTS = {
     "max_tokens": 16384,
 }
 
-VALID_CONFIG_KEYS = set(DEFAULTS.keys())
+VALID_CONFIG_KEYS = set(DEFAULTS.keys()) | {"output_format", "mcp_servers"}
 
 
 class SessionCache:
@@ -104,6 +107,13 @@ class Agent:
         # Discover templates
         self.templates = sorted(p.name for p in self.path.glob("*.j2"))
 
+        # Load output schemas for templates
+        self._schemas: dict[str, OutputSchema] = {}
+        for tpl_name in self.templates:
+            schema = load_output_schema(self.path, tpl_name)
+            if schema is not None:
+                self._schemas[tpl_name] = schema
+
         # Jinja2 environment scoped to agent folder
         self._env = Environment(
             loader=FileSystemLoader(str(self.path)),
@@ -125,23 +135,64 @@ class Agent:
                 variables[var] = "[MISSING]"
         return tpl.render(**variables)
 
-    def run_stream(self, prompt: str):
+    def get_schema(self, template_name: str) -> OutputSchema | None:
+        """Return the output schema for a template, or None if not defined."""
+        return self._schemas.get(template_name)
+
+    def _augment_prompt_with_schema(self, prompt: str, template_name: str | None) -> str:
+        """If a schema exists for the template, append it to the prompt."""
+        if not template_name or template_name not in self._schemas:
+            return prompt
+        schema = self._schemas[template_name]
+        schema_json = json.dumps(schema.schema, indent=2, ensure_ascii=False)
+        return (
+            f"{prompt}\n\n"
+            f"IMPORTANT: Respond with a JSON object matching this exact schema. "
+            f"Use the exact field names specified:\n"
+            f"```json\n{schema_json}\n```"
+        )
+
+    def run_stream(self, prompt: str, *, template_name: str | None = None):
         """Call litellm with streaming enabled.
 
         Yields ``(delta_text, None)`` per chunk and ``("", finish_reason)`` at end.
+        If *template_name* is given and has a schema, adds ``response_format``
+        to request JSON output from the model and appends the schema to the prompt.
+
+        After completion, ``self.last_usage`` contains token counts (if available).
         """
-        response = self._completion_fn(
+        actual_prompt = self._augment_prompt_with_schema(prompt, template_name)
+        self.last_usage = None
+
+        kwargs = dict(
             model=self.config["model"],
             temperature=self.config["temperature"],
             max_tokens=self.config["max_tokens"],
             messages=[
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": actual_prompt},
             ],
             stream=True,
+            stream_options={"include_usage": True},
         )
+
+        # Request JSON output when a schema exists for the template
+        if template_name and template_name in self._schemas:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        response = self._completion_fn(**kwargs)
         for chunk in response:
-            choice = chunk.choices[0]
+            # Capture usage from final chunk (sent after finish_reason)
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                self.last_usage = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                    "model": getattr(chunk, "model", self.config["model"]) or self.config["model"],
+                }
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                continue
             delta_obj = getattr(choice, "delta", None)
             delta = getattr(delta_obj, "content", None) or ""
             if choice.finish_reason:
@@ -150,6 +201,82 @@ class Agent:
             if delta:
                 yield (delta, None)
         yield ("", "stop")
+
+    def run_with_tools(self, prompt: str, tools: list[dict], call_tool_fn, *, template_name: str | None = None):
+        """Multi-turn LLM call with tool use support.
+
+        Yields events:
+        - ``("text", delta)`` for streaming text
+        - ``("tool_call", {"name": name, "arguments": args})`` when LLM wants a tool
+        - ``("tool_result", {"name": name, "result": result})`` after tool execution
+        - ``("finish", full_text)`` at the end
+
+        *call_tool_fn* should accept ``(name: str, arguments: dict)`` and return ``str``.
+        """
+        actual_prompt = self._augment_prompt_with_schema(prompt, template_name)
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": actual_prompt},
+        ]
+
+        kwargs = dict(
+            model=self.config["model"],
+            temperature=self.config["temperature"],
+            max_tokens=self.config["max_tokens"],
+            tools=tools,
+        )
+
+        if template_name and template_name in self._schemas:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        max_turns = 10  # Safety limit for tool-calling loops
+        full_text = ""
+
+        for _turn in range(max_turns):
+            kwargs["messages"] = messages
+            response = self._completion_fn(**kwargs)
+            choice = response.choices[0]
+            message = choice.message
+
+            # Accumulate any text content
+            if message.content:
+                full_text += message.content
+                yield ("text", message.content)
+
+            # Check for tool calls
+            tool_calls = getattr(message, "tool_calls", None)
+            if not tool_calls:
+                yield ("finish", full_text)
+                return
+
+            # Process tool calls
+            messages.append(message)  # Add assistant message with tool_calls
+
+            for tc in tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                yield ("tool_call", {"name": fn_name, "arguments": fn_args})
+
+                try:
+                    result = call_tool_fn(fn_name, fn_args)
+                except Exception as exc:
+                    result = f"Error: {exc}"
+
+                yield ("tool_result", {"name": fn_name, "result": result})
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+        # Safety: max turns reached
+        yield ("finish", full_text)
 
     def run(self, prompt: str) -> tuple[str, str]:
         """Call litellm with system prompt + user prompt.

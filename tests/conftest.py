@@ -55,13 +55,15 @@ def make_mock_stream_completion(chunks, finish_reason="stop"):
                 choices=[SimpleNamespace(
                     delta=SimpleNamespace(content=text),
                     finish_reason=None,
-                )]
+                )],
+                usage=None,
             )
         # Final chunk with finish_reason
         yield SimpleNamespace(
             choices=[SimpleNamespace(
                 delta=SimpleNamespace(content=None),
                 finish_reason=finish_reason,
-            )]
+            )],
+            usage=None,
         )
     return _mock

@@ -27,6 +27,8 @@ StepCompleteCallback = Callable[[StepDefinition, StepResult], None]
 CheckpointCallback = Callable[[StepDefinition, StepResult], CheckpointAction]
 StreamDeltaCallback = Callable[[StepDefinition, str], None]
 EditCallback = Callable[[StepDefinition, StepResult], str]
+ToolCallCallback = Callable[[StepDefinition, dict], None]
+ToolResultCallback = Callable[[StepDefinition, dict], None]
 
 
 class WorkflowRunner:
@@ -46,6 +48,8 @@ class WorkflowRunner:
         on_checkpoint: CheckpointCallback | None = None,
         on_stream_delta: StreamDeltaCallback | None = None,
         on_edit: EditCallback | None = None,
+        on_tool_call: ToolCallCallback | None = None,
+        on_tool_result: ToolResultCallback | None = None,
     ):
         self.workflow = workflow
         self.agents = agents
@@ -56,6 +60,8 @@ class WorkflowRunner:
         self._on_checkpoint = on_checkpoint
         self._on_stream_delta = on_stream_delta
         self._on_edit = on_edit
+        self._on_tool_call = on_tool_call
+        self._on_tool_result = on_tool_result
 
     def set_inputs(self, inputs: dict[str, str]) -> None:
         """Set user-provided input values."""
@@ -88,6 +94,21 @@ class WorkflowRunner:
 
     def _execute_step(self, step: StepDefinition) -> StepResult | None:
         """Execute a single step. Returns None if aborted at checkpoint."""
+        # Evaluate condition (skip if false)
+        if step.condition is not None:
+            if not self._evaluate_condition(step.condition):
+                logger.info("Step %r skipped: condition not met", step.id)
+                result = StepResult(
+                    step_id=step.id,
+                    output="",
+                    finish_reason="skipped",
+                    status=StepStatus.SKIPPED,
+                )
+                self.context.set_result(step.id, result)
+                if self._on_step_complete:
+                    self._on_step_complete(step, result)
+                return result
+
         # Notify step start
         if self._on_step_start:
             self._on_step_start(step)
@@ -113,17 +134,34 @@ class WorkflowRunner:
         # Render template
         rendered = agent.render_template(step.template, resolved_vars)
 
-        # Run LLM with streaming
+        # Run LLM — use tool-calling loop if MCP tools are available
         full_text = ""
         finish_reason = "stop"
         try:
-            for delta, reason in agent.run_stream(rendered):
-                if delta and self._on_stream_delta:
-                    self._on_stream_delta(step, delta)
-                if delta:
-                    full_text += delta
-                if reason is not None:
-                    finish_reason = reason
+            mcp_tools = getattr(agent, '_mcp_tools', None)
+            mcp_call_fn = getattr(agent, '_mcp_call_fn', None)
+            if mcp_tools and mcp_call_fn:
+                for event_type, event_data in agent.run_with_tools(
+                    rendered, mcp_tools, mcp_call_fn, template_name=step.template
+                ):
+                    if event_type == "text":
+                        full_text += event_data
+                        if self._on_stream_delta:
+                            self._on_stream_delta(step, event_data)
+                    elif event_type == "tool_call" and self._on_tool_call:
+                        self._on_tool_call(step, event_data)
+                    elif event_type == "tool_result" and self._on_tool_result:
+                        self._on_tool_result(step, event_data)
+                    elif event_type == "finish":
+                        full_text = event_data
+            else:
+                for delta, reason in agent.run_stream(rendered, template_name=step.template):
+                    if delta and self._on_stream_delta:
+                        self._on_stream_delta(step, delta)
+                    if delta:
+                        full_text += delta
+                    if reason is not None:
+                        finish_reason = reason
         except Exception as exc:
             logger.error("Step %r LLM error: %s", step.id, exc)
             result = StepResult(
@@ -138,11 +176,23 @@ class WorkflowRunner:
                 self._on_step_complete(step, result)
             return result
 
+        # Validate against schema if available
+        parsed_output = None
+        schema = agent.get_schema(step.template)
+        if schema is not None:
+            from core.schema import validate_output
+            parsed, errors = validate_output(full_text, schema)
+            if not errors:
+                parsed_output = parsed
+            else:
+                logger.warning("Step %r schema validation errors: %s", step.id, errors)
+
         result = StepResult(
             step_id=step.id,
             output=full_text,
             finish_reason=finish_reason,
             status=StepStatus.COMPLETED,
+            parsed_output=parsed_output,
         )
         self.context.set_result(step.id, result)
 
@@ -166,6 +216,38 @@ class WorkflowRunner:
                 self.context.set_result(step.id, result)
 
         return result
+
+    def _evaluate_condition(self, condition: str) -> bool:
+        """Evaluate a Jinja2 condition expression against the current context.
+
+        Uses Jinja2 rendering (no eval!) for safe expression evaluation.
+        Returns True if the rendered result is truthy.
+        """
+        from jinja2 import Environment
+
+        env = Environment()
+
+        # Build template context from workflow context
+        tpl_context = {
+            "input": self.context.inputs,
+            "steps": {},
+        }
+        for step_id, result in self.context.results.items():
+            step_data = {
+                "output": result.parsed_output if result.parsed_output is not None else result.output,
+                "status": result.status.value,
+                "error": result.error,
+            }
+            tpl_context["steps"][step_id] = step_data
+
+        try:
+            # Wrap in {% if %} to evaluate as boolean
+            template = env.from_string(f"{{% if {condition} %}}true{{% else %}}false{{% endif %}}")
+            rendered = template.render(**tpl_context)
+            return rendered.strip() == "true"
+        except Exception as exc:
+            logger.warning("Condition evaluation failed for %r: %s", condition, exc)
+            return False
 
     def _run_parallel_group_sequential(self, group: ParallelGroup) -> bool:
         """Run a parallel group's steps sequentially (Phase 1 fallback).

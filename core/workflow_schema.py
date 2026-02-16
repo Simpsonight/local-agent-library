@@ -29,6 +29,7 @@ class StepDefinition:
     template: str  # Template filename (.j2)
     variables: dict[str, str] = field(default_factory=dict)  # name -> expression
     checkpoint: bool = False  # Pause for human review after this step
+    condition: str | None = None  # Jinja2 expression; step skipped if evaluates to false
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ def _parse_step(raw: dict) -> StepDefinition:
         template=raw["template"],
         variables=dict(raw.get("variables", {})),
         checkpoint=bool(raw.get("checkpoint", False)),
+        condition=raw.get("condition"),
     )
 
 
@@ -183,6 +185,55 @@ def validate_workflow(
                             f"Step {step.id!r}, variable {var_name!r}: "
                             f"references undefined step {step_id!r}"
                         )
+
+    return errors
+
+
+def validate_template_schema_consistency(
+    definition: WorkflowDefinition,
+    agent_schemas: dict[str, dict[str, dict]],
+) -> list[str]:
+    """Check that step variable references to parsed fields exist in the target schema.
+
+    *agent_schemas* maps agent_name -> {template_name: schema_dict}.
+    """
+    errors: list[str] = []
+    all_steps = _collect_all_steps(definition)
+    step_map: dict[str, StepDefinition] = {s.id: s for s in all_steps}
+
+    for step in all_steps:
+        for var_name, expr in step.variables.items():
+            if "steps." not in expr:
+                continue
+            ref = _extract_ref(expr, "steps.")
+            if not ref:
+                continue
+            parts = ref.split(".")
+            if len(parts) < 3:
+                continue  # e.g. steps.X.output — no deep field
+            ref_step_id = parts[0]
+            if parts[1] != "output":
+                continue
+            field_path = parts[2:]
+            # Look up the referenced step's schema
+            ref_step = step_map.get(ref_step_id)
+            if ref_step is None:
+                continue
+            agent_name = ref_step.agent
+            tpl_name = ref_step.template
+            schemas = agent_schemas.get(agent_name, {})
+            schema = schemas.get(tpl_name)
+            if schema is None:
+                continue
+            # Check top-level field exists in schema properties
+            props = schema.get("properties", {})
+            top_field = field_path[0].split("[")[0]  # Strip bracket notation
+            if top_field not in props:
+                errors.append(
+                    f"Step {step.id!r}, variable {var_name!r}: "
+                    f"references field {top_field!r} not in schema of "
+                    f"{agent_name}/{tpl_name}"
+                )
 
     return errors
 

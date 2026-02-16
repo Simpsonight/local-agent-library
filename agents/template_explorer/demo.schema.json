@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Structured summary of the input"
+    },
+    "key_points": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Key points extracted from the input"
+    },
+    "category": {
+      "type": "string",
+      "description": "Category classification of the topic"
+    }
+  },
+  "required": ["summary", "key_points", "category"]
+}

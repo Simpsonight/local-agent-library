@@ -1,9 +1,11 @@
 """Rich-based terminal UI helpers with questionary interactive menus."""
 
+from __future__ import annotations
+
 import sys
 
 import questionary
-from questionary import Style as QStyle
+from questionary import Choice, Style as QStyle
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit import prompt as pt_prompt
@@ -14,6 +16,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
+from rich.syntax import Syntax
 from rich.theme import Theme
 
 theme = Theme({
@@ -249,14 +252,63 @@ def print_rendered_prompt(rendered: str):
     console.print(panel)
 
 
-def print_response(text: str):
-    """Display LLM response as Markdown in a styled Panel."""
+def print_response(text: str, *, parsed: dict | None = None):
+    """Display LLM response — structured JSON if parsed, otherwise Markdown."""
+    if parsed is not None:
+        print_structured_response(parsed)
+        return
     panel = Panel(
         Markdown(text),
         title="Response",
         border_style="green",
         title_align="left",
     )
+    console.print(panel)
+
+
+def print_structured_response(data: dict):
+    """Display structured JSON output with syntax highlighting."""
+    import json
+    json_str = json.dumps(data, indent=2, ensure_ascii=False)
+    syntax = Syntax(json_str, "json", theme="monokai", word_wrap=True)
+    panel = Panel(
+        syntax,
+        title="Structured Response (JSON)",
+        border_style="green",
+        title_align="left",
+    )
+    console.print(panel)
+
+
+def print_validation_errors(errors: list[str], attempts: int):
+    """Display schema validation errors as a warning panel."""
+    lines = [f"[warning]Schema validation failed after {attempts} attempt(s):[/]"]
+    for err in errors:
+        lines.append(f"  [error]• {err}[/]")
+    panel = Panel(
+        "\n".join(lines),
+        title="Validation Errors",
+        border_style="yellow",
+        title_align="left",
+    )
+    console.print(panel)
+
+
+def print_tool_call(name: str, args: dict):
+    """Display an MCP tool call as an info panel."""
+    import json
+    args_str = json.dumps(args, indent=2, ensure_ascii=False) if args else "{}"
+    content = f"[info]Tool:[/] {name}\n[info]Args:[/]\n{args_str}"
+    panel = Panel(content, title="Tool Call", border_style="cyan", title_align="left")
+    console.print(panel)
+
+
+def print_tool_result(name: str, result: str):
+    """Display an MCP tool result (truncated if long)."""
+    preview = result[:500]
+    if len(result) > 500:
+        preview += f"\n... ({len(result)} chars total)"
+    panel = Panel(preview, title=f"Tool Result: {name}", border_style="dim", title_align="left")
     console.print(panel)
 
 
@@ -281,6 +333,36 @@ def print_markdown(text: str):
     console.print(Markdown(text))
 
 
+def print_usage_inline(model: str, prompt_tokens: int, completion_tokens: int, cost_usd: float, attempts: int = 1):
+    """Display a compact one-line usage summary after an LLM call."""
+    total = prompt_tokens + completion_tokens
+    parts = [f"[dim]{model}[/]"]
+    if total > 0:
+        parts.append(f"[dim]{total:,} tokens ({prompt_tokens:,}+{completion_tokens:,})[/]")
+    if cost_usd > 0:
+        parts.append(f"[dim]~${cost_usd:.4f}[/]")
+    if attempts > 1:
+        parts.append(f"[warning]{attempts} attempts[/]")
+    console.print("  " + "  ·  ".join(parts))
+
+
+def print_cost_summary(summary: dict):
+    """Display a cost/usage summary panel (session totals)."""
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="cyan")
+    table.add_column()
+    table.add_row("Prompt Tokens", f"{summary['total_prompt_tokens']:,}")
+    table.add_row("Completion Tokens", f"{summary['total_completion_tokens']:,}")
+    table.add_row("Total Tokens", f"{summary['total_tokens']:,}")
+    cost = summary['total_cost_usd']
+    table.add_row("Estimated Cost", f"${cost:.4f}" if cost > 0 else "N/A")
+    table.add_row("API Calls", str(summary['num_calls']))
+    if summary.get('models_used'):
+        table.add_row("Models", ", ".join(summary['models_used']))
+    panel = Panel(table, border_style="dim", title="Session Usage Summary", title_align="left")
+    console.print(panel)
+
+
 def stream_response(token_generator):
     """Consume a streaming token generator with a live display.
 
@@ -299,6 +381,74 @@ def stream_response(token_generator):
             if reason is not None:
                 finish_reason = reason
     return full_text, finish_reason
+
+
+# ── A/B Model Selection ──────────────────────────────────
+
+
+def select_ab_models(available: list, current_model_id: str) -> list[str] | None:
+    """Checkbox multi-select for A/B model comparison.
+
+    *available* is a list of ``ModelEntry`` objects.  The agent's current model
+    is pre-checked.  Returns a list of model id strings (min 2) or None on cancel.
+
+    Falls back to ``_select_ab_models_fallback`` when stdin is not a terminal.
+    """
+    if not _is_interactive():
+        return _select_ab_models_fallback(available, current_model_id)
+
+    choices = [
+        Choice(
+            title=entry.checkbox_label,
+            value=entry.id,
+            checked=(entry.id == current_model_id),
+        )
+        for entry in available
+    ]
+
+    try:
+        result = questionary.checkbox(
+            "Select models for A/B test (min 2):",
+            choices=choices,
+            style=_Q_STYLE,
+            instruction="(Space toggle, Enter confirm)",
+            validate=lambda sel: len(sel) >= 2 or "Select at least 2 models",
+        ).ask()
+        if result is None:
+            return None
+        return result
+    except KeyboardInterrupt:
+        return None
+
+
+def _select_ab_models_fallback(available: list, current_model_id: str) -> list[str] | None:
+    """Numbered list fallback for non-TTY environments."""
+    console.print("\n[heading]Available models for A/B test:[/]")
+    for i, entry in enumerate(available, 1):
+        marker = " [success]*[/]" if entry.id == current_model_id else ""
+        console.print(f"  [info]{i}[/]) {entry.checkbox_label}{marker}")
+    console.print("[dim]  (* = agent default)[/]")
+
+    raw = console.input("[prompt]\nEnter model numbers (comma-separated, min 2): [/]").strip()
+    if not raw:
+        return None
+
+    selected: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        try:
+            idx = int(part) - 1
+            if 0 <= idx < len(available):
+                model_id = available[idx].id
+                if model_id not in selected:
+                    selected.append(model_id)
+        except ValueError:
+            pass
+
+    if len(selected) < 2:
+        print_error("Need at least 2 models for A/B testing.")
+        return None
+    return selected
 
 
 # ── Workflow UI helpers ───────────────────────────────────

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "optimized_text": {
+      "type": "string",
+      "description": "The fully optimized text with integrated keywords"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["new", "changed"]
+          },
+          "location": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["type", "location", "description"]
+      },
+      "description": "List of changes made to the original text"
+    },
+    "keywords_integrated": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Keywords successfully integrated into the text"
+    }
+  },
+  "required": ["optimized_text", "changes", "keywords_integrated"]
+}

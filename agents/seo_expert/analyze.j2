@@ -1,14 +1,17 @@
-### AUFGABE: SEO-ANALYSE & MAPPING
-Analysiere den folgenden Text und erstelle einen Plan, wo die Ziel-Keywords am sinnvollsten integriert werden können, ohne den Text zu überladen.
+### TASK: SEO ANALYSIS & MAPPING
+Analyze the following text and create a plan for where the target keywords can be most effectively integrated without overloading the text.
 
-**Ziel-Keywords:** {{ keywords }}
+**Target Keywords:** {{ keywords }}
 
-**Original-Text:**
+**Original Text:**
 ---
 {{ original_text }}
 ---
 
-**Erwarte Output:**
-1. Eine kurze Einschätzung der aktuellen Keyword-Präsenz.
-2. Vorschläge für spezifische Abschnitte oder Sätze, die für eine Optimierung prädestiniert sind.
-3. Identifikation von semantischen Lücken.
+**Expected Output:**
+Respond with a JSON object containing the following fields:
+- `current_keywords`: Array of keywords already present in the text (keep them in the original language of the text)
+- `missing_keywords`: Array of target keywords not yet present (keep them in the original language)
+- `optimization_locations`: Array of objects with `location`, `suggestion`, `keyword` — specific places with optimization potential. Write `location` and `suggestion` in English.
+- `semantic_gaps`: Array of missing semantic topics or related terms (in English)
+- `overall_score`: Number 0-100 for the current SEO optimization score

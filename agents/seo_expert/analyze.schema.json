@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "current_keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Keywords currently present in the text"
+    },
+    "missing_keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Target keywords not yet present"
+    },
+    "optimization_locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "location": { "type": "string" },
+          "suggestion": { "type": "string" },
+          "keyword": { "type": "string" }
+        },
+        "required": ["location", "suggestion", "keyword"]
+      },
+      "description": "Specific locations where keywords can be integrated"
+    },
+    "semantic_gaps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Semantic topics or related terms that are missing"
+    },
+    "overall_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Current SEO optimization score (0-100)"
+    }
+  },
+  "required": ["current_keywords", "missing_keywords", "optimization_locations", "semantic_gaps", "overall_score"]
+}

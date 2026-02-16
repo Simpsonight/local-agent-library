@@ -27,7 +27,22 @@ def discover_agents(agents_dir: Path | None = None) -> list[Agent]:
         if not folder.is_dir() or folder.name.startswith((".", "_")):
             continue
         try:
-            agents.append(Agent(folder))
+            agent = Agent(folder)
+            # Validate that all templates have schemas
+            missing_schemas = []
+            for tpl in agent.templates:
+                if agent.get_schema(tpl) is None:
+                    missing_schemas.append(tpl)
+            if missing_schemas:
+                for tpl in missing_schemas:
+                    logger.error(
+                        "Agent '%s': template '%s' has no schema file (%s.schema.json required)",
+                        agent.name, tpl, tpl.removesuffix(".j2"),
+                    )
+                raise ValueError(
+                    f"Templates without schema: {', '.join(missing_schemas)}"
+                )
+            agents.append(agent)
         except Exception as exc:
             logger.warning("Skipping agent '%s': %s", folder.name, exc)
     return agents

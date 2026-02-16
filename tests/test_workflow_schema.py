@@ -9,6 +9,7 @@ from core.workflow_schema import (
     WorkflowDefinition,
     load_workflow,
     validate_workflow,
+    validate_template_schema_consistency,
 )
 
 
@@ -297,3 +298,110 @@ class TestValidateWorkflow:
         )
         errors = validate_workflow(defn, agents)
         assert errors == []
+
+
+class TestValidateTemplateSchemaConsistency:
+    def _make_defn(self, steps):
+        return WorkflowDefinition(
+            name="Test",
+            description="",
+            steps=steps,
+            inputs=[],
+        )
+
+    def test_valid_field_reference(self):
+        schemas = {
+            "agent1": {
+                "tpl.j2": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "keywords": {"type": "array"},
+                    },
+                },
+            },
+        }
+        defn = self._make_defn(steps=[
+            StepDefinition(id="s1", agent="agent1", template="tpl.j2"),
+            StepDefinition(
+                id="s2", agent="agent1", template="tpl.j2",
+                variables={"x": "{{ steps.s1.output.summary }}"},
+            ),
+        ])
+        errors = validate_template_schema_consistency(defn, schemas)
+        assert errors == []
+
+    def test_missing_field_reference(self):
+        schemas = {
+            "agent1": {
+                "tpl.j2": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                    },
+                },
+            },
+        }
+        defn = self._make_defn(steps=[
+            StepDefinition(id="s1", agent="agent1", template="tpl.j2"),
+            StepDefinition(
+                id="s2", agent="agent1", template="tpl.j2",
+                variables={"x": "{{ steps.s1.output.missing_field }}"},
+            ),
+        ])
+        errors = validate_template_schema_consistency(defn, schemas)
+        assert len(errors) == 1
+        assert "missing_field" in errors[0]
+        assert "not in schema" in errors[0]
+
+    def test_no_schema_skips_validation(self):
+        schemas = {}  # No schema for agent1/tpl.j2
+        defn = self._make_defn(steps=[
+            StepDefinition(id="s1", agent="agent1", template="tpl.j2"),
+            StepDefinition(
+                id="s2", agent="agent1", template="tpl.j2",
+                variables={"x": "{{ steps.s1.output.anything }}"},
+            ),
+        ])
+        errors = validate_template_schema_consistency(defn, schemas)
+        assert errors == []  # No error when schema is missing
+
+    def test_bracket_notation_stripped(self):
+        schemas = {
+            "agent1": {
+                "tpl.j2": {
+                    "type": "object",
+                    "properties": {
+                        "items": {"type": "array"},
+                    },
+                },
+            },
+        }
+        defn = self._make_defn(steps=[
+            StepDefinition(id="s1", agent="agent1", template="tpl.j2"),
+            StepDefinition(
+                id="s2", agent="agent1", template="tpl.j2",
+                variables={"x": "{{ steps.s1.output.items[0] }}"},
+            ),
+        ])
+        errors = validate_template_schema_consistency(defn, schemas)
+        assert errors == []  # Should strip [0] and validate 'items' exists
+
+    def test_non_output_reference_ignored(self):
+        schemas = {
+            "agent1": {
+                "tpl.j2": {
+                    "type": "object",
+                    "properties": {"result": {"type": "string"}},
+                },
+            },
+        }
+        defn = self._make_defn(steps=[
+            StepDefinition(id="s1", agent="agent1", template="tpl.j2"),
+            StepDefinition(
+                id="s2", agent="agent1", template="tpl.j2",
+                variables={"x": "{{ steps.s1.some_other_attr }}"},
+            ),
+        ])
+        errors = validate_template_schema_consistency(defn, schemas)
+        assert errors == []  # Only validates .output references

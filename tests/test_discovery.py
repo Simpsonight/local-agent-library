@@ -11,6 +11,7 @@ class TestDiscoverAgents:
         agent.mkdir()
         (agent / "system.txt").write_text("system prompt")
         (agent / "demo.j2").write_text("{{ x }}")
+        (agent / "demo.schema.json").write_text('{"type": "object", "properties": {"result": {"type": "string"}}}')
 
         agents = discover_agents(tmp_path)
         assert len(agents) == 1
@@ -24,6 +25,8 @@ class TestDiscoverAgents:
         visible = tmp_path / "visible_agent"
         visible.mkdir()
         (visible / "system.txt").write_text("prompt")
+        (visible / "demo.j2").write_text("{{ x }}")
+        (visible / "demo.schema.json").write_text('{"type": "object", "properties": {}}')
 
         agents = discover_agents(tmp_path)
         assert len(agents) == 1
@@ -37,6 +40,8 @@ class TestDiscoverAgents:
         valid = tmp_path / "valid_agent"
         valid.mkdir()
         (valid / "system.txt").write_text("prompt")
+        (valid / "demo.j2").write_text("{{ x }}")
+        (valid / "demo.schema.json").write_text('{"type": "object", "properties": {}}')
 
         agents = discover_agents(tmp_path)
         assert len(agents) == 1
@@ -50,3 +55,16 @@ class TestDiscoverAgents:
     def test_nonexistent_directory(self, tmp_path):
         agents = discover_agents(tmp_path / "does_not_exist")
         assert agents == []
+
+    def test_skips_agent_with_missing_schema(self, tmp_path, caplog):
+        agent = tmp_path / "no_schema_agent"
+        agent.mkdir()
+        (agent / "system.txt").write_text("system prompt")
+        (agent / "demo.j2").write_text("{{ x }}")
+        # No demo.schema.json → should be skipped
+
+        agents = discover_agents(tmp_path)
+        assert len(agents) == 0
+        assert "Skipping agent 'no_schema_agent'" in caplog.text
+        assert "Templates without schema: demo.j2" in caplog.text
+        assert "demo.schema.json required" in caplog.text

@@ -19,6 +19,7 @@ from core.cli import (
     console,
     print_agent_info,
     print_banner,
+    print_cost_summary,
     print_error,
     print_info,
     print_rendered_prompt,
@@ -26,7 +27,10 @@ from core.cli import (
     print_rule,
     print_step_header,
     print_step_result,
+    print_structured_response,
     print_success,
+    print_usage_inline,
+    print_validation_errors,
     print_variable_summary,
     print_warning,
     print_workflow_info,
@@ -35,14 +39,19 @@ from core.cli import (
     prompt_text,
     prompt_workflow_input,
     read_multiline,
+    select_ab_models,
     select_action,
     select_menu,
     stream_response,
 )
+from core.ab_runner import ABRunner, format_comparison
 from core.clipboard import copy_to_clipboard
 from core.commands import parse_command
+from core.cost_tracker import CostTracker, estimate_cost
+from core.model_registry import get_registry
 from core.discovery import discover_agents, discover_workflows
 from core.engine import session_cache
+from core.output_pipeline import OutputPipeline, OutputResult
 from core.preflight import check_api_key
 from core.resolver import collect_variables, resolve_command
 from core.workflow_context import CheckpointAction, StepStatus
@@ -56,6 +65,9 @@ from core.workflow_schema import (
 
 logger = logging.getLogger(__name__)
 
+# Session-wide cost tracker
+cost_tracker = CostTracker()
+
 POST_ACTIONS = [
     "Continue",
     "Copy to clipboard",
@@ -66,6 +78,7 @@ POST_ACTIONS = [
 TOP_LEVEL_MODES = [
     "Run Single Agent",
     "Run Workflow",
+    "A/B Model Test",
 ]
 
 
@@ -223,6 +236,22 @@ def _run_workflow(workflows: list[WorkflowDefinition], agents_list: list):
 
     def on_step_complete(step, result):
         print_step_result(step.id, result.status.value, len(result.output))
+        # Track cost per step
+        agent = agents_map.get(step.agent)
+        if agent and result.status.value == "completed":
+            usage = getattr(agent, "last_usage", None)
+            if usage and (usage.get("prompt_tokens", 0) > 0 or usage.get("completion_tokens", 0) > 0):
+                pt = usage.get("prompt_tokens", 0)
+                ct = usage.get("completion_tokens", 0)
+                model = usage.get("model", agent.config["model"])
+            else:
+                # Fallback: estimate tokens (~4 chars per token)
+                pt = len(result.output) // 4  # rough prompt estimate
+                ct = len(result.output) // 4
+                model = agent.config["model"]
+            step_cost = estimate_cost(model, pt, ct)
+            cost_tracker.record(model, pt, ct, step_id=step.id)
+            print_usage_inline(model, pt, ct, step_cost)
 
     def on_checkpoint(step, result) -> CheckpointAction:
         # Show the output
@@ -326,14 +355,17 @@ def _run_single_agent(agents_list: list):
     rendered = agent.render_template(template_name, variables)
     print_rendered_prompt(rendered)
 
-    # Streaming LLM call
-    result = None
-    finish_reason = "stop"
+    # Run through output pipeline (handles schema validation + retries)
+    pipeline = OutputPipeline()
+    output_result = None
     while True:
         try:
             with console.status("Calling LLM..."):
-                token_gen = agent.run_stream(rendered)
-            result, finish_reason = stream_response(token_gen)
+                pass  # Status spinner for initial connection
+            output_result = pipeline.run(
+                rendered, agent, template_name,
+                on_stream=lambda delta: None,  # Streaming handled by pipeline
+            )
             break
         except AuthenticationError:
             print_error("\nAuthentication failed. Check API key in .env.")
@@ -357,23 +389,125 @@ def _run_single_agent(agents_list: list):
             if not confirm("Retry?"):
                 break
 
-    if result is None:
+    if output_result is None:
         return
 
-    # Display response in styled panel
-    print_response(result)
+    # Display response
+    if output_result.errors:
+        print_validation_errors(output_result.errors, output_result.attempts)
+        print_response(output_result.raw_text)
+    elif output_result.parsed is not None:
+        print_response(output_result.raw_text, parsed=output_result.parsed)
+    else:
+        print_response(output_result.raw_text)
 
-    if finish_reason == "length":
+    if output_result.finish_reason == "length":
         print_warning(f"\n  Note: Response was truncated (max_tokens={agent.config['max_tokens']} reached).")
 
+    # Track and display cost
+    cost = estimate_cost(output_result.model, output_result.prompt_tokens, output_result.completion_tokens)
+    cost_tracker.record(
+        output_result.model,
+        output_result.prompt_tokens,
+        output_result.completion_tokens,
+    )
+    print_usage_inline(
+        output_result.model,
+        output_result.prompt_tokens,
+        output_result.completion_tokens,
+        cost,
+        output_result.attempts,
+    )
+
     # Save result + variables for reuse
-    session_cache.set(result)
+    session_cache.set(output_result.raw_text)
     session_cache.set_variables(variables)
 
     # Post-result actions
-    _handle_post_actions(result)
+    _handle_post_actions(output_result.raw_text)
 
     print_rule()
+
+
+def _run_ab_test(agents_list: list):
+    """Interactive A/B model comparison mode."""
+    if not agents_list:
+        print_error("No agents found.")
+        return
+
+    # Select agent
+    agent_labels = [f"{a.name} ({len(a.templates)} templates)" for a in agents_list]
+    idx = select_menu("Select agent:", agent_labels)
+    if idx is None:
+        return
+    agent = agents_list[idx]
+
+    # Select template
+    if not agent.templates:
+        print_error("  No templates (.j2) found for this agent.")
+        return
+    tidx = select_menu("Select template:", agent.templates)
+    if tidx is None:
+        return
+    template_name = agent.templates[tidx]
+
+    # Collect variables
+    variables = collect_variables(agent, template_name)
+    if variables is None:
+        return
+
+    # Select models via checkbox UI
+    registry = get_registry()
+    available = registry.available_models()
+    if len(available) < 2:
+        print_error(
+            "Need at least 2 models with API keys configured for A/B testing.\n"
+            "  Check your .env file and models.yaml."
+        )
+        return
+    models = select_ab_models(available, agent.config["model"])
+    if not models:
+        return
+
+    # Render prompt
+    rendered = agent.render_template(template_name, variables)
+    print_rendered_prompt(rendered)
+
+    # Run A/B test
+    console.print(f"\n[heading]Running A/B test across {len(models)} models...[/]")
+    runner = ABRunner(agent, template_name)
+    try:
+        comparison = runner.run(rendered, models)
+    except Exception as e:
+        print_error(f"A/B test error: {e}")
+        return
+
+    # Display results
+    for i, result in enumerate(comparison.results, 1):
+        status = "[success]VALID[/]" if result.schema_valid else "[error]INVALID[/]"
+        console.print(f"\n[heading]Model {i}: {result.model}[/]  {status}  ({result.duration_seconds}s)")
+        if result.parsed:
+            print_response(result.output, parsed=result.parsed)
+        else:
+            print_response(result.output)
+        print_usage_inline(result.model, result.prompt_tokens, result.completion_tokens, result.cost_usd)
+        if result.errors:
+            for err in result.errors[:3]:
+                print_warning(f"  {err}")
+
+        # Track cost
+        cost_tracker.record(result.model, result.prompt_tokens, result.completion_tokens)
+
+    # Summary
+    console.print(f"\n[heading]Comparison Summary:[/]")
+    console.print(format_comparison(comparison))
+    print_rule()
+
+
+def _show_session_costs():
+    """Display session cost summary if any calls were made."""
+    if cost_tracker.total_tokens > 0:
+        print_cost_summary(cost_tracker.summary())
 
 
 def main():
@@ -394,6 +528,7 @@ def main():
             if workflows:
                 mode_idx = select_menu("Select mode:", TOP_LEVEL_MODES)
                 if mode_idx is None:
+                    _show_session_costs()
                     print_info("\nGoodbye!")
                     sys.exit(0)
                 mode = TOP_LEVEL_MODES[mode_idx]
@@ -402,13 +537,17 @@ def main():
 
             if mode == "Run Workflow":
                 _run_workflow(workflows, agents_list)
+            elif mode == "A/B Model Test":
+                _run_ab_test(agents_list)
             else:
                 _run_single_agent(agents_list)
 
         except KeyboardInterrupt:
+            _show_session_costs()
             print_info("\n\nGoodbye!")
             sys.exit(0)
         except EOFError:
+            _show_session_costs()
             print_info("\n\nGoodbye!")
             sys.exit(0)
 

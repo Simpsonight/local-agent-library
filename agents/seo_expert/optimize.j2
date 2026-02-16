@@ -1,14 +1,20 @@
-### AUFGABE: CHIRURGISCHE SEO-OPTIMIERUNG
-Überarbeite den Text basierend auf den Keywords. Setze die Markierungs-Regeln aus dem System-Prompt strikt um.
+### TASK: SURGICAL SEO OPTIMIZATION
+Revise the text based on the keywords. Strictly apply the marker rules from the system prompt.
 
-**Ziel-Keywords:** {{ keywords }}
+**Target Keywords:** {{ keywords }}
 
-**Zusätzliche Strategie-Vorgabe (optional):**
+**Additional Strategy Input (optional):**
 {{ analysis_plan }}
 
-**Original-Text zum Bearbeiten:**
+**Original Text to Edit:**
 ---
 {{ original_text }}
 ---
 
-**WICHTIG:** Gib den VOLLSTÄNDIGEN Text zurück. Nutze [[NEU: ...]] und [[GEÄNDERT: ...]] für alle Anpassungen. Behalte die Struktur (Markdown/HTML) exakt bei.
+**IMPORTANT:** Keep the structure (Markdown/HTML) exactly intact. The optimized text MUST remain in the same language as the original text.
+
+**Expected Output:**
+Respond with a JSON object containing the following fields:
+- `optimized_text`: The complete optimized text with [[NEW: ...]] and [[CHANGED: ...]] markers. Keep the text in its original language — only add/modify content, do not translate.
+- `changes`: Array of objects with `type` ("new" or "changed"), `location`, `description` — list of all changes. Write `location` and `description` in English.
+- `keywords_integrated`: Array of keywords successfully integrated (in their original language)
