@@ -1,0 +1,26 @@
+name: SEO Pipeline
+description: Analysiert Content und optimiert ihn für SEO
+
+steps:
+  - id: analyze
+    agent: seo_expert
+    template: analyze.j2
+    variables:
+      keywords: "{{ input.keywords }}"
+      original_text: "{{ input.original_text }}"
+
+  - id: optimize
+    agent: seo_expert
+    template: optimize.j2
+    variables:
+      keywords: "{{ input.keywords }}"
+      original_text: "{{ input.original_text }}"
+      analysis_plan: "{{ steps.analyze.output }}"
+    checkpoint: true
+
+inputs:
+  - name: keywords
+    description: "Ziel-Keywords (kommasepariert)"
+  - name: original_text
+    description: "Der zu optimierende Text"
+    command: true

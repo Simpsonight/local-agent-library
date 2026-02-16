@@ -299,3 +299,84 @@ def stream_response(token_generator):
             if reason is not None:
                 finish_reason = reason
     return full_text, finish_reason
+
+
+# ── Workflow UI helpers ───────────────────────────────────
+
+
+def print_workflow_info(name: str, description: str, step_count: int, input_count: int):
+    """Display workflow details in a styled Panel."""
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="cyan")
+    table.add_column()
+    table.add_row("Workflow", name)
+    if description:
+        table.add_row("Description", description)
+    table.add_row("Steps", str(step_count))
+    table.add_row("Inputs", str(input_count))
+    panel = Panel(table, border_style="cyan", title="Workflow Info", title_align="left")
+    console.print(panel)
+
+
+def print_step_header(step_id: str, agent_name: str, template: str, step_num: int, total: int):
+    """Display a header for a workflow step being executed."""
+    console.print(
+        f"\n[info]Step {step_num}/{total}:[/] "
+        f"[bold]{step_id}[/] → [cyan]{agent_name}[/] / {template}"
+    )
+
+
+def print_step_result(step_id: str, status: str, output_len: int):
+    """Display a summary line for a completed step."""
+    if status == "completed":
+        console.print(f"  [success]✓ {step_id}[/] ({output_len} chars)")
+    elif status == "failed":
+        console.print(f"  [error]✗ {step_id} FAILED[/]")
+    elif status == "skipped":
+        console.print(f"  [warning]○ {step_id} skipped[/]")
+
+
+def prompt_checkpoint(step_id: str) -> str:
+    """Show checkpoint menu after a step. Returns 'approve', 'edit', or 'abort'."""
+    choices = [
+        "Approve & Continue",
+        "Edit Output",
+        "Abort Workflow",
+    ]
+    result = select_action(f"Checkpoint [{step_id}]:", choices)
+    if result == "Edit Output":
+        return "edit"
+    if result == "Abort Workflow":
+        return "abort"
+    return "approve"
+
+
+def prompt_workflow_input(name: str, description: str, allow_commands: bool) -> str:
+    """Prompt for a workflow input value with optional command support."""
+    label = name
+    if description:
+        label = f"{name} ({description})"
+    if allow_commands:
+        return prompt_variable(label)
+    if not _is_interactive():
+        return console.input(f"[prompt]  {label}: [/]").strip()
+    try:
+        result = pt_prompt(f"  {label}: ")
+        return result.strip() if result else ""
+    except (KeyboardInterrupt, EOFError):
+        return ""
+
+
+def print_workflow_summary(results: dict, total_steps: int):
+    """Display a final summary of workflow execution."""
+    completed = sum(1 for r in results.values() if r.status.value == "completed")
+    failed = sum(1 for r in results.values() if r.status.value == "failed")
+    skipped = sum(1 for r in results.values() if r.status.value == "skipped")
+
+    parts = [f"[success]{completed} completed[/]"]
+    if failed:
+        parts.append(f"[error]{failed} failed[/]")
+    if skipped:
+        parts.append(f"[warning]{skipped} skipped[/]")
+
+    console.print(f"\n[heading]Workflow complete:[/] {', '.join(parts)}")

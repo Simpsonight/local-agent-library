@@ -24,19 +24,35 @@ from core.cli import (
     print_rendered_prompt,
     print_response,
     print_rule,
+    print_step_header,
+    print_step_result,
     print_success,
     print_variable_summary,
     print_warning,
+    print_workflow_info,
+    print_workflow_summary,
+    prompt_checkpoint,
     prompt_text,
+    prompt_workflow_input,
+    read_multiline,
     select_action,
     select_menu,
     stream_response,
 )
 from core.clipboard import copy_to_clipboard
-from core.discovery import discover_agents
+from core.commands import parse_command
+from core.discovery import discover_agents, discover_workflows
 from core.engine import session_cache
 from core.preflight import check_api_key
-from core.resolver import collect_variables
+from core.resolver import collect_variables, resolve_command
+from core.workflow_context import CheckpointAction, StepStatus
+from core.workflow_runner import WorkflowRunner
+from core.workflow_schema import (
+    ParallelGroup,
+    StepDefinition,
+    WorkflowDefinition,
+    validate_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +61,11 @@ POST_ACTIONS = [
     "Copy to clipboard",
     "Save with alias",
     "Copy + Save with alias",
+]
+
+TOP_LEVEL_MODES = [
+    "Run Single Agent",
+    "Run Workflow",
 ]
 
 
@@ -75,6 +96,286 @@ def _handle_post_actions(result: str):
             print_success(f"  Saved as ctx.{alias}")
 
 
+def _collect_workflow_inputs(workflow: WorkflowDefinition) -> dict[str, str] | None:
+    """Prompt the user for all workflow inputs. Returns None if aborted."""
+    if not workflow.inputs:
+        return {}
+
+    console.print("\n[heading]Enter workflow inputs:[/]")
+    inputs: dict[str, str] = {}
+    for inp in workflow.inputs:
+        while True:
+            raw = prompt_workflow_input(inp.name, inp.description, inp.command)
+            if not raw:
+                print_warning(f"  Warning: '{inp.name}' empty")
+                inputs[inp.name] = ""
+                break
+
+            # If commands are allowed, try to resolve them
+            if inp.command:
+                try:
+                    cmd = parse_command(raw)
+                except ValueError:
+                    cmd = None
+
+                if cmd is not None:
+                    from core.commands import TxtCommand, HelpCommand
+                    if isinstance(cmd, HelpCommand):
+                        from core.resolver import HELP_TEXT
+                        console.print(HELP_TEXT)
+                        continue
+                    if isinstance(cmd, TxtCommand):
+                        text = read_multiline(cmd.first_line)
+                        inputs[inp.name] = text
+                        print_success(f"  Text captured ({len(text)} chars).")
+                        break
+                    resolved = resolve_command(cmd)
+                    if resolved is not None:
+                        inputs[inp.name] = resolved
+                        break
+                    action = console.input("[warning]  Retry (Enter) / skip (s) / abort (q): [/]").strip().lower()
+                    if action == "s":
+                        inputs[inp.name] = ""
+                        break
+                    if action == "q":
+                        return None
+                    continue
+
+                # Plain text → multiline mode
+                text = read_multiline(raw)
+                inputs[inp.name] = text
+                print_success(f"  Text captured ({len(text)} chars).")
+                break
+            else:
+                inputs[inp.name] = raw
+                break
+
+    return inputs
+
+
+def _count_all_steps(workflow: WorkflowDefinition) -> int:
+    """Count total steps including those inside parallel groups."""
+    total = 0
+    for item in workflow.steps:
+        if isinstance(item, ParallelGroup):
+            total += len(item.steps)
+        else:
+            total += 1
+    return total
+
+
+def _run_workflow(workflows: list[WorkflowDefinition], agents_list: list):
+    """Interactive workflow execution."""
+    if not workflows:
+        print_error("No workflows found in workflows/. Create a .yaml file there.")
+        return
+
+    # Select workflow
+    labels = [f"{w.name} — {w.description}" if w.description else w.name for w in workflows]
+    idx = select_menu("Select workflow:", labels)
+    if idx is None:
+        return
+    workflow = workflows[idx]
+
+    # Build agent map
+    agents_map = {a.name: a for a in agents_list}
+
+    # Validate workflow
+    available = {a.name: a.templates for a in agents_list}
+    errors = validate_workflow(workflow, available)
+    if errors:
+        print_error("Workflow validation failed:")
+        for err in errors:
+            print_error(f"  - {err}")
+        return
+
+    # Show info
+    total_steps = _count_all_steps(workflow)
+    print_workflow_info(workflow.name, workflow.description, total_steps, len(workflow.inputs))
+
+    # Pre-flight API key checks for all agents used
+    step_agents = set()
+    for item in workflow.steps:
+        if isinstance(item, ParallelGroup):
+            for s in item.steps:
+                step_agents.add(s.agent)
+        else:
+            step_agents.add(item.agent)
+    for agent_name in step_agents:
+        agent = agents_map.get(agent_name)
+        if agent:
+            key_err = check_api_key(agent.config["model"])
+            if key_err:
+                print_error(key_err)
+                return
+
+    # Collect inputs
+    inputs = _collect_workflow_inputs(workflow)
+    if inputs is None:
+        return
+
+    # Track step numbering
+    step_counter = [0]
+
+    def on_step_start(step: StepDefinition):
+        step_counter[0] += 1
+        print_step_header(step.id, step.agent, step.template, step_counter[0], total_steps)
+
+    def on_step_complete(step, result):
+        print_step_result(step.id, result.status.value, len(result.output))
+
+    def on_checkpoint(step, result) -> CheckpointAction:
+        # Show the output
+        print_response(result.output)
+        choice = prompt_checkpoint(step.id)
+        if choice == "edit":
+            return CheckpointAction.EDIT
+        if choice == "abort":
+            return CheckpointAction.ABORT
+        return CheckpointAction.APPROVE
+
+    def on_edit(step, result) -> str:
+        console.print("[heading]Edit the output (finish with --- on its own line):[/]")
+        return read_multiline(result.output)
+
+    def on_stream_delta(step, delta):
+        pass  # Streaming display is handled per-step differently in workflow mode
+
+    # Create and run
+    runner = WorkflowRunner(
+        workflow, agents_map,
+        on_step_start=on_step_start,
+        on_step_complete=on_step_complete,
+        on_checkpoint=on_checkpoint,
+        on_edit=on_edit,
+        on_stream_delta=on_stream_delta,
+    )
+    runner.set_inputs(inputs)
+
+    try:
+        ctx = runner.run()
+    except Exception as e:
+        print_error(f"Workflow error: {e}")
+        logger.debug("Workflow error: %s", e, exc_info=True)
+        return
+
+    # Show summary
+    print_workflow_summary(ctx.results, total_steps)
+
+    # Cache the last completed step's output
+    last_output = None
+    for item in reversed(workflow.steps):
+        if isinstance(item, ParallelGroup):
+            for s in reversed(item.steps):
+                if s.id in ctx.results and ctx.results[s.id].status == StepStatus.COMPLETED:
+                    last_output = ctx.results[s.id].output
+                    break
+        elif item.id in ctx.results and ctx.results[item.id].status == StepStatus.COMPLETED:
+            last_output = ctx.results[item.id].output
+        if last_output:
+            break
+
+    if last_output:
+        session_cache.set(last_output)
+        print_info(f"  Last output cached ({len(last_output)} chars). Use /ctx to access.")
+        _handle_post_actions(last_output)
+
+
+def _run_single_agent(agents_list: list):
+    """Original single-agent interactive mode."""
+    if not agents_list:
+        print_error("No agents found in agents/. Create an agent folder with system.txt.")
+        sys.exit(1)
+
+    agent_labels = [
+        f"{a.name} ({len(a.templates)} templates)" for a in agents_list
+    ]
+    idx = select_menu("Select agent:", agent_labels)
+    if idx is None:
+        return
+    agent = agents_list[idx]
+
+    # Show agent info panel
+    print_agent_info(agent.name, agent.config, len(agent.templates))
+
+    # Pre-flight API key check
+    key_err = check_api_key(agent.config["model"])
+    if key_err:
+        print_error(key_err)
+        return
+
+    # Template selection
+    if not agent.templates:
+        print_error("  No templates (.j2) found for this agent.")
+        return
+
+    tidx = select_menu("Select template:", agent.templates)
+    if tidx is None:
+        return
+    template_name = agent.templates[tidx]
+
+    # Variable input
+    variables = collect_variables(agent, template_name)
+    if variables is None:
+        return
+
+    # Variable summary
+    print_variable_summary(variables)
+
+    # Render and display prompt
+    rendered = agent.render_template(template_name, variables)
+    print_rendered_prompt(rendered)
+
+    # Streaming LLM call
+    result = None
+    finish_reason = "stop"
+    while True:
+        try:
+            with console.status("Calling LLM..."):
+                token_gen = agent.run_stream(rendered)
+            result, finish_reason = stream_response(token_gen)
+            break
+        except AuthenticationError:
+            print_error("\nAuthentication failed. Check API key in .env.")
+            logger.debug("AuthenticationError for model %s", agent.config["model"])
+            break
+        except BadRequestError as e:
+            print_error(f"\nBad request: {e}")
+            logger.debug("BadRequestError: %s", e, exc_info=True)
+            break
+        except RateLimitError:
+            print_error("\nRate limit reached. Please wait a moment.")
+            if not confirm("Retry?"):
+                break
+        except (APIConnectionError, Timeout):
+            print_error("\nConnection to API server failed.")
+            if not confirm("Retry?"):
+                break
+        except Exception as e:
+            print_error(f"\nLLM error: {e}")
+            logger.debug("LLM error: %s", e, exc_info=True)
+            if not confirm("Retry?"):
+                break
+
+    if result is None:
+        return
+
+    # Display response in styled panel
+    print_response(result)
+
+    if finish_reason == "length":
+        print_warning(f"\n  Note: Response was truncated (max_tokens={agent.config['max_tokens']} reached).")
+
+    # Save result + variables for reuse
+    session_cache.set(result)
+    session_cache.set_variables(variables)
+
+    # Post-result actions
+    _handle_post_actions(result)
+
+    print_rule()
+
+
 def main():
     load_dotenv()
     logging.basicConfig(
@@ -85,100 +386,24 @@ def main():
 
     while True:
         try:
-            # Agent selection
-            agents = discover_agents()
-            if not agents:
-                print_error("No agents found in agents/. Create an agent folder with system.txt.")
-                sys.exit(1)
+            # Discover agents and workflows
+            agents_list = discover_agents()
+            workflows = discover_workflows()
 
-            agent_labels = [
-                f"{a.name} ({len(a.templates)} templates)" for a in agents
-            ]
-            idx = select_menu("Select agent:", agent_labels)
-            if idx is None:
-                print_info("\nGoodbye!")
-                sys.exit(0)
-            agent = agents[idx]
+            # Top-level mode selection (skip if no workflows available)
+            if workflows:
+                mode_idx = select_menu("Select mode:", TOP_LEVEL_MODES)
+                if mode_idx is None:
+                    print_info("\nGoodbye!")
+                    sys.exit(0)
+                mode = TOP_LEVEL_MODES[mode_idx]
+            else:
+                mode = "Run Single Agent"
 
-            # Show agent info panel
-            print_agent_info(agent.name, agent.config, len(agent.templates))
-
-            # Pre-flight API key check
-            key_err = check_api_key(agent.config["model"])
-            if key_err:
-                print_error(key_err)
-                continue
-
-            # Template selection
-            if not agent.templates:
-                print_error("  No templates (.j2) found for this agent.")
-                continue
-
-            tidx = select_menu("Select template:", agent.templates)
-            if tidx is None:
-                continue
-            template_name = agent.templates[tidx]
-
-            # Variable input
-            variables = collect_variables(agent, template_name)
-            if variables is None:
-                continue
-
-            # Variable summary
-            print_variable_summary(variables)
-
-            # Render and display prompt
-            rendered = agent.render_template(template_name, variables)
-            print_rendered_prompt(rendered)
-
-            # Streaming LLM call
-            result = None
-            finish_reason = "stop"
-            while True:
-                try:
-                    with console.status("Calling LLM..."):
-                        token_gen = agent.run_stream(rendered)
-                    result, finish_reason = stream_response(token_gen)
-                    break
-                except AuthenticationError:
-                    print_error("\nAuthentication failed. Check API key in .env.")
-                    logger.debug("AuthenticationError for model %s", agent.config["model"])
-                    break
-                except BadRequestError as e:
-                    print_error(f"\nBad request: {e}")
-                    logger.debug("BadRequestError: %s", e, exc_info=True)
-                    break
-                except RateLimitError:
-                    print_error("\nRate limit reached. Please wait a moment.")
-                    if not confirm("Retry?"):
-                        break
-                except (APIConnectionError, Timeout):
-                    print_error("\nConnection to API server failed.")
-                    if not confirm("Retry?"):
-                        break
-                except Exception as e:
-                    print_error(f"\nLLM error: {e}")
-                    logger.debug("LLM error: %s", e, exc_info=True)
-                    if not confirm("Retry?"):
-                        break
-
-            if result is None:
-                continue
-
-            # Display response in styled panel
-            print_response(result)
-
-            if finish_reason == "length":
-                print_warning(f"\n  Note: Response was truncated (max_tokens={agent.config['max_tokens']} reached).")
-
-            # Save result + variables for reuse
-            session_cache.set(result)
-            session_cache.set_variables(variables)
-
-            # Post-result actions
-            _handle_post_actions(result)
-
-            print_rule()
+            if mode == "Run Workflow":
+                _run_workflow(workflows, agents_list)
+            else:
+                _run_single_agent(agents_list)
 
         except KeyboardInterrupt:
             print_info("\n\nGoodbye!")
