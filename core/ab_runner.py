@@ -50,11 +50,25 @@ class ABRunner:
     def run(self, prompt: str, models: list[str]) -> ABComparison:
         """Execute the prompt against each model and collect results.
 
+        Only models present in the model registry are allowed.
         Temporarily overrides the agent's model config for each run.
         """
+        from core.model_registry import get_registry
+
+        registry = get_registry()
         results: list[ABResult] = []
 
         for model in models:
+            # Validate model against registry before executing
+            if registry.get(model) is None:
+                logger.warning("A/B test: model '%s' not in registry, skipping.", model)
+                results.append(ABResult(
+                    model=model,
+                    output=f"ERROR: Model '{model}' not found in registry.",
+                    schema_valid=False,
+                    errors=[f"Model '{model}' not in registry — only registered models are allowed."],
+                ))
+                continue
             logger.info("A/B testing model: %s", model)
             result = self._run_single(prompt, model)
             results.append(result)

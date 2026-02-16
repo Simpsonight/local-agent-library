@@ -26,11 +26,13 @@ class TestCtxCommand:
 class TestUrlCommand:
     def test_simple_url(self):
         cmd = parse_command("/url https://example.com")
-        assert cmd == UrlCommand(url="https://example.com", auth=None)
+        assert cmd == UrlCommand(url="https://example.com")
 
-    def test_url_with_auth(self):
+    def test_inline_auth_no_longer_parsed(self):
+        # Inline credentials are no longer supported (VULN-004).
+        # The entire string after /url is treated as the URL.
         cmd = parse_command("/url user:pass https://example.com")
-        assert cmd == UrlCommand(url="https://example.com", auth=("user", "pass"))
+        assert cmd.auth is None
 
     def test_url_missing_argument(self):
         with pytest.raises(ValueError, match="requires a URL"):

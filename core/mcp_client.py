@@ -161,8 +161,28 @@ class MCPManager:
         ]
 
 
+# Allowed MCP server commands (extend as needed).
+_ALLOWED_MCP_COMMANDS = frozenset({
+    "npx",
+    "node",
+    "python",
+    "python3",
+    "uvx",
+    "uv",
+})
+
+# Shell metacharacters that must not appear in MCP args.
+_DANGEROUS_CHARS = frozenset(";|&`$()><")
+
+# Environment variables that must not be overridden by MCP configs.
+_BLOCKED_ENV_KEYS = frozenset({"LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"})
+
+
 def parse_mcp_configs(raw_configs: list[dict]) -> list[MCPServerConfig]:
     """Parse MCP server configurations from config.yaml format.
+
+    Security: only whitelisted commands are allowed, args are checked for
+    shell metacharacters, and dangerous env vars are blocked.
 
     Expected format:
     ```yaml
@@ -176,10 +196,32 @@ def parse_mcp_configs(raw_configs: list[dict]) -> list[MCPServerConfig]:
     for raw in raw_configs:
         if "name" not in raw or "command" not in raw:
             raise ValueError(f"MCP server config missing 'name' or 'command': {raw}")
+
+        command = raw["command"]
+        if command not in _ALLOWED_MCP_COMMANDS:
+            raise ValueError(
+                f"MCP server command '{command}' not allowed. "
+                f"Permitted: {', '.join(sorted(_ALLOWED_MCP_COMMANDS))}"
+            )
+
+        args = raw.get("args", [])
+        for arg in args:
+            if not isinstance(arg, str):
+                raise ValueError(f"MCP server args must be strings, got: {arg!r}")
+            if _DANGEROUS_CHARS & set(arg):
+                raise ValueError(f"MCP server arg contains dangerous characters: {arg!r}")
+
+        env = raw.get("env", {})
+        for key, value in env.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError("MCP server env must be string key-value pairs.")
+            if key.upper() in _BLOCKED_ENV_KEYS:
+                raise ValueError(f"Setting '{key}' in MCP server env is not allowed.")
+
         configs.append(MCPServerConfig(
             name=raw["name"],
-            command=raw["command"],
-            args=raw.get("args", []),
-            env=raw.get("env", {}),
+            command=command,
+            args=args,
+            env=env,
         ))
     return configs

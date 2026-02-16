@@ -1,5 +1,7 @@
 """Command resolution and variable collection — bridges parsed commands to I/O."""
 
+from getpass import getpass
+
 from core.cli import console, print_error, print_success, print_warning, read_multiline, prompt_variable
 from core.commands import (
     parse_command,
@@ -17,8 +19,7 @@ HELP_TEXT = """\
 Available commands:
   /ctx           Inject last LLM output
   /ctx <alias>   Inject a named cached result
-  /url <url>     Scrape web page content
-  /url <user:pass> <url>  Scrape with HTTP Basic Auth
+  /url <url>     Scrape web page content (prompts for auth if needed)
   /file <path>   Load file content
   /txt <text>    Literal plain text (bypass command parsing)
   /help          Show this help message
@@ -49,9 +50,16 @@ def resolve_command(cmd: Command, cache: SessionCache | None = None) -> str | No
         return resolved
 
     if isinstance(cmd, UrlCommand):
+        # Prompt for credentials securely (password hidden) if needed
+        auth = None
+        needs_auth = console.input("[prompt]  Requires authentication? (y/N): [/]").strip().lower()
+        if needs_auth == "y":
+            username = console.input("[prompt]  Username: [/]").strip()
+            password = getpass("  Password: ")
+            auth = (username, password)
         print_warning(f"  Loading {cmd.url} ...")
         try:
-            content = scrape_url(cmd.url, auth=cmd.auth)
+            content = scrape_url(cmd.url, auth=auth)
             print_success(f"  Loaded ({len(content)} chars).")
             return content
         except Exception as e:

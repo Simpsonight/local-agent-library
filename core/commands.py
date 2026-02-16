@@ -50,14 +50,10 @@ def parse_command(raw: str) -> Command:
         rest = raw[5:].strip()
         if not rest:
             raise ValueError("/url requires a URL argument")
-        parts = rest.split(None, 1)
-        auth = None
-        url = rest
-        if len(parts) == 2 and ":" in parts[0] and not parts[0].startswith("http"):
-            user, password = parts[0].split(":", 1)
-            auth = (user, password)
-            url = parts[1]
-        return UrlCommand(url=url, auth=auth)
+        # Inline credentials (user:pass URL) are no longer supported for
+        # security reasons — credentials were visible in history and logs.
+        # Use /url <URL> and authenticate interactively when prompted.
+        return UrlCommand(url=rest)
 
     if raw == "/url":
         raise ValueError("/url requires a URL argument")

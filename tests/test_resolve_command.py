@@ -31,16 +31,29 @@ class TestResolveCtx:
 
 
 class TestResolveUrl:
+    @patch("core.resolver.console")
     @patch("core.resolver.scrape_url", return_value="page content")
-    def test_url_calls_scraper(self, mock_scrape, cache):
+    def test_url_calls_scraper(self, mock_scrape, mock_console, cache):
+        mock_console.input.return_value = "n"  # No auth
         result = resolve_command(UrlCommand(url="https://example.com"), cache=cache)
         assert result == "page content"
         mock_scrape.assert_called_once_with("https://example.com", auth=None)
 
+    @patch("core.resolver.console")
     @patch("core.resolver.scrape_url", side_effect=Exception("network error"))
-    def test_url_error_returns_none(self, mock_scrape, cache):
+    def test_url_error_returns_none(self, mock_scrape, mock_console, cache):
+        mock_console.input.return_value = "n"  # No auth
         result = resolve_command(UrlCommand(url="https://example.com"), cache=cache)
         assert result is None
+
+    @patch("core.resolver.getpass", return_value="secret")
+    @patch("core.resolver.console")
+    @patch("core.resolver.scrape_url", return_value="authed content")
+    def test_url_with_interactive_auth(self, mock_scrape, mock_console, mock_getpass, cache):
+        mock_console.input.side_effect = ["y", "admin"]  # auth=y, username=admin
+        result = resolve_command(UrlCommand(url="https://example.com"), cache=cache)
+        assert result == "authed content"
+        mock_scrape.assert_called_once_with("https://example.com", auth=("admin", "secret"))
 
 
 class TestResolveFile:
