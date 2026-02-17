@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 import questionary
-from questionary import Choice, Style as QStyle
+from questionary import Style as QStyle
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit import prompt as pt_prompt
@@ -381,74 +381,6 @@ def stream_response(token_generator):
             if reason is not None:
                 finish_reason = reason
     return full_text, finish_reason
-
-
-# ── A/B Model Selection ──────────────────────────────────
-
-
-def select_ab_models(available: list, current_model_id: str) -> list[str] | None:
-    """Checkbox multi-select for A/B model comparison.
-
-    *available* is a list of ``ModelEntry`` objects.  The agent's current model
-    is pre-checked.  Returns a list of model id strings (min 2) or None on cancel.
-
-    Falls back to ``_select_ab_models_fallback`` when stdin is not a terminal.
-    """
-    if not _is_interactive():
-        return _select_ab_models_fallback(available, current_model_id)
-
-    choices = [
-        Choice(
-            title=entry.checkbox_label,
-            value=entry.id,
-            checked=(entry.id == current_model_id),
-        )
-        for entry in available
-    ]
-
-    try:
-        result = questionary.checkbox(
-            "Select models for A/B test (min 2):",
-            choices=choices,
-            style=_Q_STYLE,
-            instruction="(Space toggle, Enter confirm)",
-            validate=lambda sel: len(sel) >= 2 or "Select at least 2 models",
-        ).ask()
-        if result is None:
-            return None
-        return result
-    except KeyboardInterrupt:
-        return None
-
-
-def _select_ab_models_fallback(available: list, current_model_id: str) -> list[str] | None:
-    """Numbered list fallback for non-TTY environments."""
-    console.print("\n[heading]Available models for A/B test:[/]")
-    for i, entry in enumerate(available, 1):
-        marker = " [success]*[/]" if entry.id == current_model_id else ""
-        console.print(f"  [info]{i}[/]) {entry.checkbox_label}{marker}")
-    console.print("[dim]  (* = agent default)[/]")
-
-    raw = console.input("[prompt]\nEnter model numbers (comma-separated, min 2): [/]").strip()
-    if not raw:
-        return None
-
-    selected: list[str] = []
-    for part in raw.split(","):
-        part = part.strip()
-        try:
-            idx = int(part) - 1
-            if 0 <= idx < len(available):
-                model_id = available[idx].id
-                if model_id not in selected:
-                    selected.append(model_id)
-        except ValueError:
-            pass
-
-    if len(selected) < 2:
-        print_error("Need at least 2 models for A/B testing.")
-        return None
-    return selected
 
 
 # ── Workflow UI helpers ───────────────────────────────────

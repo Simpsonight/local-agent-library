@@ -39,16 +39,13 @@ from core.cli import (
     prompt_text,
     prompt_workflow_input,
     read_multiline,
-    select_ab_models,
     select_action,
     select_menu,
     stream_response,
 )
-from core.ab_runner import ABRunner, format_comparison
 from core.clipboard import copy_to_clipboard
 from core.commands import parse_command
 from core.cost_tracker import CostTracker, estimate_cost
-from core.model_registry import get_registry
 from core.discovery import discover_agents, discover_workflows
 from core.engine import session_cache
 from core.output_pipeline import OutputPipeline, OutputResult
@@ -78,7 +75,6 @@ POST_ACTIONS = [
 TOP_LEVEL_MODES = [
     "Run Single Agent",
     "Run Workflow",
-    "A/B Model Test",
 ]
 
 
@@ -429,81 +425,6 @@ def _run_single_agent(agents_list: list):
     print_rule()
 
 
-def _run_ab_test(agents_list: list):
-    """Interactive A/B model comparison mode."""
-    if not agents_list:
-        print_error("No agents found.")
-        return
-
-    # Select agent
-    agent_labels = [f"{a.name} ({len(a.templates)} templates)" for a in agents_list]
-    idx = select_menu("Select agent:", agent_labels)
-    if idx is None:
-        return
-    agent = agents_list[idx]
-
-    # Select template
-    if not agent.templates:
-        print_error("  No templates (.j2) found for this agent.")
-        return
-    tidx = select_menu("Select template:", agent.templates)
-    if tidx is None:
-        return
-    template_name = agent.templates[tidx]
-
-    # Collect variables
-    variables = collect_variables(agent, template_name)
-    if variables is None:
-        return
-
-    # Select models via checkbox UI
-    registry = get_registry()
-    available = registry.available_models()
-    if len(available) < 2:
-        print_error(
-            "Need at least 2 models with API keys configured for A/B testing.\n"
-            "  Check your .env file and models.yaml."
-        )
-        return
-    models = select_ab_models(available, agent.config["model"])
-    if not models:
-        return
-
-    # Render prompt
-    rendered = agent.render_template(template_name, variables)
-    print_rendered_prompt(rendered)
-
-    # Run A/B test
-    console.print(f"\n[heading]Running A/B test across {len(models)} models...[/]")
-    runner = ABRunner(agent, template_name)
-    try:
-        comparison = runner.run(rendered, models)
-    except Exception as e:
-        print_error(f"A/B test error: {e}")
-        return
-
-    # Display results
-    for i, result in enumerate(comparison.results, 1):
-        status = "[success]VALID[/]" if result.schema_valid else "[error]INVALID[/]"
-        console.print(f"\n[heading]Model {i}: {result.model}[/]  {status}  ({result.duration_seconds}s)")
-        if result.parsed:
-            print_response(result.output, parsed=result.parsed)
-        else:
-            print_response(result.output)
-        print_usage_inline(result.model, result.prompt_tokens, result.completion_tokens, result.cost_usd)
-        if result.errors:
-            for err in result.errors[:3]:
-                print_warning(f"  {err}")
-
-        # Track cost
-        cost_tracker.record(result.model, result.prompt_tokens, result.completion_tokens)
-
-    # Summary
-    console.print(f"\n[heading]Comparison Summary:[/]")
-    console.print(format_comparison(comparison))
-    print_rule()
-
-
 def _show_session_costs():
     """Display session cost summary if any calls were made."""
     if cost_tracker.total_tokens > 0:
@@ -537,8 +458,6 @@ def main():
 
             if mode == "Run Workflow":
                 _run_workflow(workflows, agents_list)
-            elif mode == "A/B Model Test":
-                _run_ab_test(agents_list)
             else:
                 _run_single_agent(agents_list)
 
