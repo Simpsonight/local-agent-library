@@ -2,7 +2,7 @@
 
 from getpass import getpass
 
-from core.cli import console, print_error, print_success, print_warning, read_multiline, prompt_variable
+from core.cli import console, print_error, print_success, print_warning, prompt_variable, input_zone, prompt_input, print_input_hint
 from core.commands import (
     parse_command,
     Command,
@@ -24,7 +24,7 @@ Available commands:
   /txt <text>    Literal plain text (bypass command parsing)
   /help          Show this help message
 
-Plain text input enters multiline mode (finish with --- on its own line).\
+Alt+Enter (Esc→Enter) for newline, \\ at line end for continuation, Enter to submit.\
 """
 
 
@@ -90,63 +90,63 @@ def collect_variables(agent: Agent, template_name: str, cache: SessionCache | No
         print_warning("  No variables found.")
         return variables
 
-    console.print("\n[heading]Enter variables (/ctx, /url, /file = commands | /help for reference):[/]")
-    for var in sorted(var_names):
-        prev = cache.get_variable(var)
+    with input_zone("Variables"):
+        print_input_hint()
+        console.print("[heading]Enter variables (/ctx, /url, /file = commands | /help for reference):[/]")
+        for var in sorted(var_names):
+            prev = cache.get_variable(var)
 
-        while True:
-            raw = prompt_variable(var, prev_value=prev)
+            while True:
+                raw = prompt_variable(var, prev_value=prev)
 
-            # Empty input
-            if not raw:
-                if prev:
-                    variables[var] = prev
-                    preview = prev[:60].replace("\n", " ")
-                    if len(prev) > 60:
-                        preview += "..."
-                    print_success(f"  Reused ({len(prev)} chars): {preview}")
-                else:
-                    print_warning(f"  Warning: '{var}' empty → [MISSING]")
-                    variables[var] = "[MISSING]"
-                break
+                # Empty input
+                if not raw:
+                    if prev:
+                        variables[var] = prev
+                        preview = prev[:60].replace("\n", " ")
+                        if len(prev) > 60:
+                            preview += "..."
+                        print_success(f"  Reused ({len(prev)} chars): {preview}")
+                    else:
+                        print_warning(f"  Warning: '{var}' empty → [MISSING]")
+                        variables[var] = "[MISSING]"
+                    break
 
-            # Parse as command
-            try:
-                cmd = parse_command(raw)
-            except ValueError:
-                cmd = None
+                # Parse as command
+                try:
+                    cmd = parse_command(raw)
+                except ValueError:
+                    cmd = None
 
-            if cmd is not None:
-                # /help — show help, re-prompt
-                if isinstance(cmd, HelpCommand):
-                    console.print(HELP_TEXT)
+                if cmd is not None:
+                    # /help — show help, re-prompt
+                    if isinstance(cmd, HelpCommand):
+                        console.print(HELP_TEXT)
+                        continue
+
+                    # /txt — use first_line directly, or prompt for input
+                    if isinstance(cmd, TxtCommand):
+                        text = cmd.first_line if cmd.first_line else prompt_input(var)
+                        print_success(f"  Text captured ({len(text)} chars).")
+                        variables[var] = text
+                        break
+
+                    # Data-fetching commands
+                    resolved = resolve_command(cmd, cache=cache)
+                    if resolved is not None:
+                        variables[var] = resolved
+                        break
+                    # resolved is None → command recognized but failed
+                    action = console.input("[warning]  Retry (Enter) / skip (s) / abort (q): [/]").strip().lower()
+                    if action == "s":
+                        variables[var] = "[MISSING]"
+                        break
+                    if action == "q":
+                        return None
                     continue
 
-                # /txt — multiline text
-                if isinstance(cmd, TxtCommand):
-                    text = read_multiline(cmd.first_line)
-                    print_success(f"  Text captured ({len(text)} chars).")
-                    variables[var] = text
-                    break
-
-                # Data-fetching commands
-                resolved = resolve_command(cmd, cache=cache)
-                if resolved is not None:
-                    variables[var] = resolved
-                    break
-                # resolved is None → command recognized but failed
-                action = console.input("[warning]  Retry (Enter) / skip (s) / abort (q): [/]").strip().lower()
-                if action == "s":
-                    variables[var] = "[MISSING]"
-                    break
-                if action == "q":
-                    return None
-                continue
-
-            # Plain text → multiline mode
-            text = read_multiline(raw)
-            print_success(f"  Text captured ({len(text)} chars).")
-            variables[var] = text
-            break
+                # Plain text — raw value is used directly (multiline via Shift+Enter)
+                variables[var] = raw
+                break
 
     return variables

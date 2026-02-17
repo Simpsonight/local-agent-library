@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 
 import questionary
 from questionary import Style as QStyle
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit import prompt as pt_prompt
 from rich.console import Console
 from rich.markdown import Markdown
@@ -42,6 +44,35 @@ _Q_STYLE = QStyle([
 ])
 
 _VERSION = "0.1.0"
+
+
+def _make_input_keybindings() -> KeyBindings:
+    """Create key bindings for multiline input.
+
+    Enter submits, Escape→Enter (Alt+Enter) inserts a newline.
+    A trailing backslash before Enter is replaced with a newline (continuation).
+    """
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        buf = event.app.current_buffer
+        text = buf.text
+        # Backslash at end of current line → replace with newline (continuation)
+        if text.endswith("\\"):
+            buf.text = text[:-1]
+            buf.insert_text("\n")
+        else:
+            buf.validate_and_handle()
+
+    @kb.add("escape", "enter")
+    def _newline_alt(event):
+        event.app.current_buffer.insert_text("\n")
+
+    return kb
+
+
+_INPUT_KEYBINDINGS = _make_input_keybindings()
 
 
 def _is_interactive() -> bool:
@@ -175,12 +206,12 @@ _SLASH_COMPLETER = WordCompleter(
 def prompt_variable(var_name: str, prev_value: str | None = None) -> str:
     """Prompt for a template variable with /command autocomplete.
 
-    Uses prompt_toolkit directly for autocomplete support.
+    Uses prompt_toolkit directly with multiline key bindings.
+    Shift+Enter inserts a newline, Enter submits.
     Falls back to console.input if not interactive.
     """
     suffix = ""
     if prev_value:
-        preview_len = min(len(prev_value), 40)
         suffix = f" [Enter = reuse ({len(prev_value)} chars)]"
 
     if not _is_interactive():
@@ -194,18 +225,21 @@ def prompt_variable(var_name: str, prev_value: str | None = None) -> str:
             completer=_SLASH_COMPLETER,
             auto_suggest=AutoSuggestFromHistory(),
             complete_while_typing=False,
+            key_bindings=_INPUT_KEYBINDINGS,
+            multiline=True,
+            prompt_continuation="  ... ",
         )
         return result.strip() if result else ""
     except (KeyboardInterrupt, EOFError):
         return ""
 
 
-def read_multiline(first_line: str = "") -> str:
-    """Read lines from stdin until '---' or EOF. Returns joined text."""
+def _read_lines_until_marker(prompt_str: str = "") -> str:
+    """Non-TTY fallback: read lines until ``---`` or EOF."""
     lines: list[str] = []
-    if first_line:
-        lines.append(first_line)
-    print_warning("  (Multiline: finish with --- on its own line)")
+    if prompt_str:
+        console.print(f"[prompt]{prompt_str}[/]")
+    print_warning("  (Enter text, finish with --- on its own line)")
     try:
         while True:
             line = console.input("")
@@ -215,6 +249,41 @@ def read_multiline(first_line: str = "") -> str:
     except EOFError:
         pass
     return "\n".join(lines)
+
+
+def prompt_input(label: str, initial: str = "") -> str:
+    """General-purpose text input with multiline key bindings.
+
+    Uses the same Shift+Enter / Alt+Enter bindings as prompt_variable.
+    Falls back to _read_lines_until_marker when not interactive.
+    """
+    if not _is_interactive():
+        return _read_lines_until_marker(label)
+
+    try:
+        result = pt_prompt(
+            f"  {label}: ",
+            default=initial,
+            key_bindings=_INPUT_KEYBINDINGS,
+            multiline=True,
+            prompt_continuation="  ... ",
+        )
+        return result.strip() if result else ""
+    except (KeyboardInterrupt, EOFError):
+        return initial
+
+
+@contextmanager
+def input_zone(label: str = ""):
+    """Context manager that wraps content between two horizontal rules."""
+    console.print(Rule(title=label, style="dim cyan") if label else Rule(style="dim cyan"))
+    yield
+    console.print(Rule(style="dim cyan"))
+
+
+def print_input_hint():
+    """Display a one-time hint about multiline input shortcuts."""
+    console.print("[dim]  Alt+Enter (Esc→Enter) für Newline | \\ am Zeilenende für Continuation | Enter zum Absenden[/]")
 
 
 def print_agent_info(name: str, config: dict, template_count: int):
@@ -346,6 +415,35 @@ def print_usage_inline(model: str, prompt_tokens: int, completion_tokens: int, c
     console.print("  " + "  ·  ".join(parts))
 
 
+def print_agent_work_summary(model: str, tokens: int, cost: float, duration_sec: float):
+    """Compact one-line summary after an LLM call (Claude Code style)."""
+    parts = [f"[dim]{model}[/]"]
+    if tokens > 0:
+        parts.append(f"[dim]{tokens:,} tokens[/]")
+    if cost > 0:
+        parts.append(f"[dim]~${cost:.4f}[/]")
+    if duration_sec > 0:
+        parts.append(f"[dim]{duration_sec:.1f}s[/]")
+    console.print("  " + "  ·  ".join(parts))
+
+
+def print_agent_work_details(rendered: str, model: str, prompt_tokens: int, completion_tokens: int, cost: float, attempts: int = 1):
+    """Detailed panel showing rendered prompt and full token breakdown."""
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="cyan")
+    table.add_column()
+    table.add_row("Model", model)
+    table.add_row("Prompt Tokens", f"{prompt_tokens:,}")
+    table.add_row("Completion Tokens", f"{completion_tokens:,}")
+    table.add_row("Total Tokens", f"{prompt_tokens + completion_tokens:,}")
+    if cost > 0:
+        table.add_row("Cost", f"~${cost:.4f}")
+    if attempts > 1:
+        table.add_row("Attempts", str(attempts))
+    console.print(Panel(table, title="Token Details", border_style="dim", title_align="left"))
+    console.print(Panel(rendered, title="Rendered Prompt", border_style="dim", title_align="left"))
+
+
 def print_cost_summary(summary: dict):
     """Display a cost/usage summary panel (session totals)."""
     table = Table(show_header=False, box=None, padding=(0, 2))
@@ -363,21 +461,31 @@ def print_cost_summary(summary: dict):
     console.print(panel)
 
 
-def stream_response(token_generator):
+def stream_response(token_generator, *, model: str = ""):
     """Consume a streaming token generator with a live display.
 
     *token_generator* must yield ``(delta_text, finish_reason | None)`` tuples.
     Returns ``(full_text, finish_reason)``.
+
+    The streamed text remains visible after completion (``transient=False``).
+    A spinner is shown until the first token arrives.
     """
     full_text = ""
     finish_reason = "stop"
-    text_display = Text()
-    with Live(text_display, console=console, refresh_per_second=12, transient=True) as live:
+    spinner_label = f"{model} generating..." if model else "Generating..."
+    started = False
+    with Live(
+        Text(f"⏳ {spinner_label}", style="dim"),
+        console=console,
+        refresh_per_second=12,
+        transient=False,
+    ) as live:
         for delta, reason in token_generator:
             if delta:
                 full_text += delta
-                text_display.append(delta)
-                live.update(text_display)
+                if not started:
+                    started = True
+                live.update(Markdown(full_text))
             if reason is not None:
                 finish_reason = reason
     return full_text, finish_reason

@@ -1,6 +1,6 @@
 from .engine import Agent, session_cache
 from .commands import parse_command, CtxCommand, UrlCommand, FileCommand, TxtCommand, HelpCommand
-from .cli import console, print_banner, numbered_menu, print_error, print_success, print_warning, print_info, print_markdown, stream_response, print_structured_response, print_validation_errors, print_tool_call, print_tool_result
+from .cli import console, print_banner, numbered_menu, print_error, print_success, print_warning, print_info, print_markdown, stream_response, print_structured_response, print_validation_errors, print_tool_call, print_tool_result, input_zone, prompt_input, print_input_hint, print_agent_work_summary, print_agent_work_details
 from .clipboard import copy_to_clipboard
 from .discovery import discover_agents, discover_workflows
 from .resolver import resolve_command, collect_variables, HELP_TEXT

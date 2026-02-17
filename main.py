@@ -4,6 +4,7 @@
 import logging
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from litellm.exceptions import (
@@ -17,11 +18,15 @@ from litellm.exceptions import (
 from core.cli import (
     confirm,
     console,
+    input_zone,
     print_agent_info,
+    print_agent_work_details,
+    print_agent_work_summary,
     print_banner,
     print_cost_summary,
     print_error,
     print_info,
+    print_input_hint,
     print_rendered_prompt,
     print_response,
     print_rule,
@@ -36,9 +41,9 @@ from core.cli import (
     print_workflow_info,
     print_workflow_summary,
     prompt_checkpoint,
+    prompt_input,
     prompt_text,
     prompt_workflow_input,
-    read_multiline,
     select_action,
     select_menu,
     stream_response,
@@ -67,6 +72,7 @@ cost_tracker = CostTracker()
 
 POST_ACTIONS = [
     "Continue",
+    "Show run details",
     "Copy to clipboard",
     "Save with alias",
     "Copy + Save with alias",
@@ -78,11 +84,24 @@ TOP_LEVEL_MODES = [
 ]
 
 
-def _handle_post_actions(result: str):
-    """Handle post-result user actions (copy, save, etc.)."""
+def _handle_post_actions(result: str, *, details: dict | None = None):
+    """Handle post-result user actions (copy, save, show details, etc.)."""
     action = select_action("What next?", POST_ACTIONS)
 
-    if action == "Copy to clipboard":
+    if action == "Show run details":
+        if details:
+            print_agent_work_details(
+                details["rendered"],
+                details["model"],
+                details["prompt_tokens"],
+                details["completion_tokens"],
+                details["cost"],
+                details.get("attempts", 1),
+            )
+        else:
+            print_warning("  No run details available.")
+
+    elif action == "Copy to clipboard":
         if copy_to_clipboard(result):
             print_success("  Copied to clipboard!")
         else:
@@ -110,54 +129,53 @@ def _collect_workflow_inputs(workflow: WorkflowDefinition) -> dict[str, str] | N
     if not workflow.inputs:
         return {}
 
-    console.print("\n[heading]Enter workflow inputs:[/]")
     inputs: dict[str, str] = {}
-    for inp in workflow.inputs:
-        while True:
-            raw = prompt_workflow_input(inp.name, inp.description, inp.command)
-            if not raw:
-                print_warning(f"  Warning: '{inp.name}' empty")
-                inputs[inp.name] = ""
-                break
+    with input_zone("Workflow Inputs"):
+        print_input_hint()
+        for inp in workflow.inputs:
+            while True:
+                raw = prompt_workflow_input(inp.name, inp.description, inp.command)
+                if not raw:
+                    print_warning(f"  Warning: '{inp.name}' empty")
+                    inputs[inp.name] = ""
+                    break
 
-            # If commands are allowed, try to resolve them
-            if inp.command:
-                try:
-                    cmd = parse_command(raw)
-                except ValueError:
-                    cmd = None
+                # If commands are allowed, try to resolve them
+                if inp.command:
+                    try:
+                        cmd = parse_command(raw)
+                    except ValueError:
+                        cmd = None
 
-                if cmd is not None:
-                    from core.commands import TxtCommand, HelpCommand
-                    if isinstance(cmd, HelpCommand):
-                        from core.resolver import HELP_TEXT
-                        console.print(HELP_TEXT)
+                    if cmd is not None:
+                        from core.commands import TxtCommand, HelpCommand
+                        if isinstance(cmd, HelpCommand):
+                            from core.resolver import HELP_TEXT
+                            console.print(HELP_TEXT)
+                            continue
+                        if isinstance(cmd, TxtCommand):
+                            text = cmd.first_line if cmd.first_line else prompt_input(inp.name)
+                            inputs[inp.name] = text
+                            print_success(f"  Text captured ({len(text)} chars).")
+                            break
+                        resolved = resolve_command(cmd)
+                        if resolved is not None:
+                            inputs[inp.name] = resolved
+                            break
+                        action = console.input("[warning]  Retry (Enter) / skip (s) / abort (q): [/]").strip().lower()
+                        if action == "s":
+                            inputs[inp.name] = ""
+                            break
+                        if action == "q":
+                            return None
                         continue
-                    if isinstance(cmd, TxtCommand):
-                        text = read_multiline(cmd.first_line)
-                        inputs[inp.name] = text
-                        print_success(f"  Text captured ({len(text)} chars).")
-                        break
-                    resolved = resolve_command(cmd)
-                    if resolved is not None:
-                        inputs[inp.name] = resolved
-                        break
-                    action = console.input("[warning]  Retry (Enter) / skip (s) / abort (q): [/]").strip().lower()
-                    if action == "s":
-                        inputs[inp.name] = ""
-                        break
-                    if action == "q":
-                        return None
-                    continue
 
-                # Plain text → multiline mode
-                text = read_multiline(raw)
-                inputs[inp.name] = text
-                print_success(f"  Text captured ({len(text)} chars).")
-                break
-            else:
-                inputs[inp.name] = raw
-                break
+                    # Plain text — raw value used directly (multiline via Shift+Enter)
+                    inputs[inp.name] = raw
+                    break
+                else:
+                    inputs[inp.name] = raw
+                    break
 
     return inputs
 
@@ -260,8 +278,7 @@ def _run_workflow(workflows: list[WorkflowDefinition], agents_list: list):
         return CheckpointAction.APPROVE
 
     def on_edit(step, result) -> str:
-        console.print("[heading]Edit the output (finish with --- on its own line):[/]")
-        return read_multiline(result.output)
+        return prompt_input("Edit output", initial=result.output)
 
     def on_stream_delta(step, delta):
         pass  # Streaming display is handled per-step differently in workflow mode
@@ -347,13 +364,13 @@ def _run_single_agent(agents_list: list):
     # Variable summary
     print_variable_summary(variables)
 
-    # Render and display prompt
+    # Render prompt (displayed later on-demand via "Show run details")
     rendered = agent.render_template(template_name, variables)
-    print_rendered_prompt(rendered)
 
     # Run through output pipeline (handles schema validation + retries)
     pipeline = OutputPipeline()
     output_result = None
+    t_start = time.monotonic()
     while True:
         try:
             with console.status("Calling LLM..."):
@@ -371,7 +388,12 @@ def _run_single_agent(agents_list: list):
             print_error(f"\nBad request: {e}")
             logger.debug("BadRequestError: %s", e, exc_info=True)
             break
-        except RateLimitError:
+        except RateLimitError as e:
+            msg = str(e)
+            if "quota" in msg.lower() or "billing" in msg.lower():
+                print_error(f"\nQuota exceeded — check your plan and billing details at your provider.")
+                print_error(f"  {msg}")
+                break
             print_error("\nRate limit reached. Please wait a moment.")
             if not confirm("Retry?"):
                 break
@@ -384,43 +406,45 @@ def _run_single_agent(agents_list: list):
             logger.debug("LLM error: %s", e, exc_info=True)
             if not confirm("Retry?"):
                 break
+    duration = time.monotonic() - t_start
 
     if output_result is None:
         return
 
-    # Display response
+    # Display response — only for structured/parsed outputs or errors
     if output_result.errors:
         print_validation_errors(output_result.errors, output_result.attempts)
         print_response(output_result.raw_text)
     elif output_result.parsed is not None:
         print_response(output_result.raw_text, parsed=output_result.parsed)
-    else:
-        print_response(output_result.raw_text)
 
     if output_result.finish_reason == "length":
         print_warning(f"\n  Note: Response was truncated (max_tokens={agent.config['max_tokens']} reached).")
 
-    # Track and display cost
+    # Track and display cost — compact summary line
     cost = estimate_cost(output_result.model, output_result.prompt_tokens, output_result.completion_tokens)
     cost_tracker.record(
         output_result.model,
         output_result.prompt_tokens,
         output_result.completion_tokens,
     )
-    print_usage_inline(
-        output_result.model,
-        output_result.prompt_tokens,
-        output_result.completion_tokens,
-        cost,
-        output_result.attempts,
-    )
+    total_tokens = output_result.prompt_tokens + output_result.completion_tokens
+    print_agent_work_summary(output_result.model, total_tokens, cost, duration)
 
     # Save result + variables for reuse
     session_cache.set(output_result.raw_text)
     session_cache.set_variables(variables)
 
-    # Post-result actions
-    _handle_post_actions(output_result.raw_text)
+    # Post-result actions with details for on-demand display
+    run_details = {
+        "rendered": rendered,
+        "model": output_result.model,
+        "prompt_tokens": output_result.prompt_tokens,
+        "completion_tokens": output_result.completion_tokens,
+        "cost": cost,
+        "attempts": output_result.attempts,
+    }
+    _handle_post_actions(output_result.raw_text, details=run_details)
 
     print_rule()
 

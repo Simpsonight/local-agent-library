@@ -163,7 +163,14 @@ class WorkflowRunner:
                     if reason is not None:
                         finish_reason = reason
         except Exception as exc:
-            logger.error("Step %r LLM error: %s", step.id, exc)
+            exc_msg = str(exc)
+            if "quota" in exc_msg.lower() or "billing" in exc_msg.lower():
+                logger.error(
+                    "Step %r quota exceeded — check your plan and billing: %s",
+                    step.id, exc,
+                )
+            else:
+                logger.error("Step %r LLM error: %s", step.id, exc)
             result = StepResult(
                 step_id=step.id,
                 output=full_text,
