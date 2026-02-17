@@ -268,8 +268,11 @@ def _run_workflow(workflows: list[WorkflowDefinition], agents_list: list):
             print_usage_inline(model, pt, ct, step_cost)
 
     def on_checkpoint(step, result) -> CheckpointAction:
-        # Show the output
-        print_response(result.output)
+        # Show the output (with parsed JSON if available)
+        if result.parsed_output is not None:
+            print_response(result.output, parsed=result.parsed_output)
+        else:
+            print_response(result.output)
         choice = prompt_checkpoint(step.id)
         if choice == "edit":
             return CheckpointAction.EDIT
@@ -304,22 +307,31 @@ def _run_workflow(workflows: list[WorkflowDefinition], agents_list: list):
     # Show summary
     print_workflow_summary(ctx.results, total_steps)
 
-    # Cache the last completed step's output
+    # Find the last completed step's result
     last_output = None
+    last_result = None
     for item in reversed(workflow.steps):
         if isinstance(item, ParallelGroup):
             for s in reversed(item.steps):
                 if s.id in ctx.results and ctx.results[s.id].status == StepStatus.COMPLETED:
-                    last_output = ctx.results[s.id].output
+                    last_result = ctx.results[s.id]
+                    last_output = last_result.output
                     break
         elif item.id in ctx.results and ctx.results[item.id].status == StepStatus.COMPLETED:
-            last_output = ctx.results[item.id].output
+            last_result = ctx.results[item.id]
+            last_output = last_result.output
         if last_output:
             break
 
     if last_output:
         session_cache.set(last_output)
-        print_info(f"  Last output cached ({len(last_output)} chars). Use /ctx to access.")
+
+        # Display final output like single-agent mode
+        if last_result.parsed_output is not None:
+            print_response(last_output, parsed=last_result.parsed_output)
+        else:
+            print_response(last_output)
+
         _handle_post_actions(last_output)
 
 
